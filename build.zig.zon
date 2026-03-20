@@ -1,0 +1,15 @@
+.{
+    .name = .zerotiercore,
+    .version = "1.16.1",
+    .fingerprint = 0x429b6f19fe7d0568,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "node",
+        "osdep",
+        "ext",
+        "include",
+    },
+}
