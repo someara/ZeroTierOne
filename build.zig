@@ -179,12 +179,8 @@ pub fn build(b: *std.Build) void {
         "src/node/sha512.zig",
         "src/node/poly1305.zig",
         "src/node/salsa20.zig",
-    };
-
-    // Modules that use @cImport need C include paths.
-    const c_import_modules = [_][]const u8{
-        "src/node/constants.zig",
-        "src/node/sha512.zig",
+        "src/node/ecc.zig",
+        "src/node/aes.zig",
     };
 
     const test_step = b.step("test", "Run Zig module tests");
@@ -196,14 +192,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
 
-        // Add C include paths for modules that @cImport C headers
-        for (c_import_modules) |cim| {
-            if (std.mem.eql(u8, test_file, cim)) {
-                // Project root so @cImport can find "include/ZeroTierOne.h"
-                test_mod.addIncludePath(b.path("."));
-                break;
-            }
-        }
+        // All test modules get the project root include path so that
+        // transitive @cImport of "include/ZeroTierOne.h" (via
+        // constants.zig) resolves correctly.
+        test_mod.addIncludePath(b.path("."));
 
         const t = b.addTest(.{
             .root_module = test_mod,
