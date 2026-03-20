@@ -181,6 +181,13 @@ pub fn build(b: *std.Build) void {
         "src/node/salsa20.zig",
         "src/node/ecc.zig",
         "src/node/aes.zig",
+        // Phase 3a: Network address types
+        "src/node/address.zig",
+        "src/node/mac.zig",
+        "src/node/inet_address.zig",
+        "src/node/multicast_group.zig",
+        "src/node/dns.zig",
+        "src/node/dictionary.zig",
     };
 
     const test_step = b.step("test", "Run Zig module tests");
