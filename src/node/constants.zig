@@ -335,6 +335,21 @@ else if (builtin.cpu.arch == .x86)
 else
     10000;
 
+// ── Interface name and path constants ──────────────────────────────
+
+/// Maximum physical interface name length (from osdep/Binder.hpp).
+pub const max_physifname = 256;
+
+/// Maximum path preference rank: `(MAX_SCOPE << 1) | 1`.
+/// Matches C++ `ZT_PATH_MAX_PREFERENCE_RANK`.
+pub const path_max_preference_rank = (@as(u32, @import("inet_address.zig").MAX_SCOPE) << 1) | 1;
+
+// ── Self-awareness ─────────────────────────────────────────────────
+
+/// Timeout for self-awareness entries (ms). After this long without update,
+/// an external surface address entry is garbage-collected.
+pub const selfawareness_entry_timeout = 600000;
+
 // ── Trust and socket parameters ────────────────────────────────────
 
 /// How long a path/peer retains trust relationship (ms).

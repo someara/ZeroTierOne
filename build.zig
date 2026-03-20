@@ -203,6 +203,12 @@ pub fn build(b: *std.Build) void {
         "src/node/runtime_environment.zig",
         "src/node/network_config.zig",
         "src/node/network_controller.zig",
+        // Phase 4: Peer Management
+        "src/node/path.zig",
+        "src/node/trace.zig",
+        "src/node/self_awareness.zig",
+        "src/node/peer.zig",
+        "src/node/topology.zig",
     };
 
     const test_step = b.step("test", "Run Zig module tests");
