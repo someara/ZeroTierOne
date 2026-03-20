@@ -198,6 +198,11 @@ pub fn build(b: *std.Build) void {
         "src/node/certificate_of_membership.zig",
         "src/node/certificate_of_ownership.zig",
         "src/node/capability.zig",
+        // Phase 3d: Configuration
+        "src/node/world.zig",
+        "src/node/runtime_environment.zig",
+        "src/node/network_config.zig",
+        "src/node/network_controller.zig",
     };
 
     const test_step = b.step("test", "Run Zig module tests");

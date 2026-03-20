@@ -569,7 +569,7 @@ pub fn deserializeRules(
     comptime C: u32,
     buf: *const Buffer(C),
     start_pos: u32,
-    out_rules: *[max_rules]Rule,
+    out_rules: []Rule,
     out_rule_count: *u32,
     max_rule_count: u32,
 ) !u32 {
