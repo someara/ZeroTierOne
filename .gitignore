@@ -141,3 +141,8 @@ __pycache__
 *.pyc
 *_source.tar.bz2
 snap/.snapcraft
+
+# Zig build artifacts
+.zig-cache/
+zig-out/
+/tmp/
