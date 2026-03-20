@@ -188,6 +188,10 @@ pub fn build(b: *std.Build) void {
         "src/node/multicast_group.zig",
         "src/node/dns.zig",
         "src/node/dictionary.zig",
+        // Phase 3b: Identity + Packet
+        "src/node/identity.zig",
+        "src/node/lz4.zig",
+        "src/node/packet.zig",
     };
 
     const test_step = b.step("test", "Run Zig module tests");
