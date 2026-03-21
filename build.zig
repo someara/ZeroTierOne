@@ -214,6 +214,8 @@ pub fn build(b: *std.Build) void {
         "src/node/outbound_multicast.zig",
         "src/node/multicaster.zig",
         "src/node/network.zig",
+        // Phase 6: Packet Processing & Node
+        "src/node/packet_multiplexer.zig",
     };
 
     const test_step = b.step("test", "Run Zig module tests");
