@@ -213,6 +213,7 @@ pub fn build(b: *std.Build) void {
         "src/node/membership.zig",
         "src/node/outbound_multicast.zig",
         "src/node/multicaster.zig",
+        "src/node/network.zig",
     };
 
     const test_step = b.step("test", "Run Zig module tests");
