@@ -209,6 +209,10 @@ pub fn build(b: *std.Build) void {
         "src/node/self_awareness.zig",
         "src/node/peer.zig",
         "src/node/topology.zig",
+        // Phase 5: Network & Multicast
+        "src/node/membership.zig",
+        "src/node/outbound_multicast.zig",
+        "src/node/multicaster.zig",
     };
 
     const test_step = b.step("test", "Run Zig module tests");

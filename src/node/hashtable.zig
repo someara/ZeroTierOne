@@ -133,6 +133,13 @@ fn HashContext(comptime K: type) type {
         }
 
         pub fn eql(_: Self, a: K, b: K) bool {
+            if (@typeInfo(K) == .@"struct") {
+                if (@hasDecl(K, "eql")) {
+                    return a.eql(b);
+                } else {
+                    return std.mem.eql(u8, std.mem.asBytes(&a), std.mem.asBytes(&b));
+                }
+            }
             return a == b;
         }
 
