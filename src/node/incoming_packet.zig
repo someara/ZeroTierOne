@@ -2046,13 +2046,23 @@ pub const IncomingPacket = struct {
                 if (port > 0 and (addrlen == 4 or addrlen == 16)) {
                     // Deserialize the suggested contact address.
                     var at_addr = InetAddress.InetAddress.zero();
-                    _ = at_addr.deserializeWithPort(
-                        packet.max_packet_length,
-                        &self.pkt.buf,
-                        packet.rendezvous_idx.idx_address,
-                        addrlen,
-                        port,
-                    ) catch return true;
+                    if (addrlen == 4) {
+                        var bytes: [4]u8 = undefined;
+                        var i: u32 = 0;
+                        while (i < 4) : (i += 1) {
+                            bytes[i] = self.pkt.buf.at(u8, packet.rendezvous_idx.idx_address + i) catch return true;
+                        }
+                        at_addr = InetAddress.InetAddress.initV4(bytes, port);
+                    } else if (addrlen == 16) {
+                        var bytes: [16]u8 = undefined;
+                        var i: u32 = 0;
+                        while (i < 16) : (i += 1) {
+                            bytes[i] = self.pkt.buf.at(u8, packet.rendezvous_idx.idx_address + i) catch return true;
+                        }
+                        at_addr = InetAddress.InetAddress.initV6(bytes, port);
+                    } else {
+                        return true;
+                    }
 
                     const local_socket = cb.pathLocalSocket(cb.ctx, self.path);
 
@@ -2216,7 +2226,7 @@ pub const IncomingPacket = struct {
         // Compute flow ID for QoS if peer supports it.
         if (cb.peerFlowHashingSupported(cb.ctx, peer)) {
             const pkt_size = self.pkt.buf.size();
-            if (pkt_size > packet.ext_frame_idx.idx_frame) {
+            if (pkt_size > packet.ext_frame_idx.idx_frame_payload) {
                 const flags = self.pkt.buf.at(u8, packet.ext_frame_idx.idx_flags) catch 0;
                 const com_len: u32 = 0; // Simplified: assume no COM
 
@@ -2225,7 +2235,7 @@ pub const IncomingPacket = struct {
                 _ = flags;
 
                 const ethertype_offset = com_len + packet.ext_frame_idx.idx_ethertype;
-                const frame_payload_offset = com_len + packet.ext_frame_idx.idx_frame;
+                const frame_payload_offset = com_len + packet.ext_frame_idx.idx_frame_payload;
                 if (pkt_size > frame_payload_offset) {
                     const ethertype = self.pkt.buf.at(u16, ethertype_offset) catch ethertype_ipv4;
                     const frame_len = pkt_size - frame_payload_offset;
@@ -2251,7 +2261,7 @@ pub const IncomingPacket = struct {
             }
 
             const pkt_size = self.pkt.buf.size();
-            const frame_payload_idx = com_len + packet.ext_frame_idx.idx_frame;
+            const frame_payload_idx = com_len + packet.ext_frame_idx.idx_frame_payload;
             if (pkt_size > frame_payload_idx) {
                 const ethertype_idx = com_len + packet.ext_frame_idx.idx_ethertype;
                 const to_idx = com_len + packet.ext_frame_idx.idx_to;
@@ -2503,8 +2513,8 @@ pub const IncomingPacket = struct {
         const pkt_size = self.pkt.buf.size();
 
         // Metadata follows the network ID (dictionary or other format).
-        const meta_ptr = if (meta_data_offset < pkt_size)
-            @as(*const anyopaque, @ptrCast(self.pkt.buf.data()[meta_data_offset..].ptr))
+        const meta_ptr: ?*const anyopaque = if (meta_data_offset < pkt_size)
+            @as(?*const anyopaque, @ptrCast(self.pkt.buf.data()[meta_data_offset..].ptr))
         else
             null;
 
