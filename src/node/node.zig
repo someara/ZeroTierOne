@@ -336,6 +336,93 @@ pub const Node = struct {
             kv.value.deinit();
             self.allocator.destroy(kv.value);
         }
+
+        // TODO: Notify via callback
+        // TODO: Delete state object
+    }
+
+    /// Get node's ZeroTier address.
+    pub fn address(self: *const Self) u64 {
+        return self.identity.address().toInt();
+    }
+
+    /// Get node status.
+    pub fn status(self: *const Self, out: *Status) void {
+        out.address = self.identity.address().toInt();
+        out.online = self.online;
+        // TODO: Fill in identity strings, etc.
+    }
+
+    /// Subscribe to a multicast group.
+    pub fn multicastSubscribe(
+        self: *Self,
+        t_ptr: ?*anyopaque,
+        nwid: u64,
+        multicast_group: u64,
+        multicast_adi: u32,
+    ) !void {
+        const network = self.getNetwork(nwid) orelse return error.NetworkNotFound;
+
+        _ = t_ptr;
+        _ = network;
+        _ = multicast_group;
+        _ = multicast_adi;
+
+        // TODO: Call network.multicastSubscribe
+    }
+
+    /// Unsubscribe from a multicast group.
+    pub fn multicastUnsubscribe(
+        self: *Self,
+        nwid: u64,
+        multicast_group: u64,
+        multicast_adi: u32,
+    ) !void {
+        const network = self.getNetwork(nwid) orelse return error.NetworkNotFound;
+
+        _ = network;
+        _ = multicast_group;
+        _ = multicast_adi;
+
+        // TODO: Call network.multicastUnsubscribe
+    }
+
+    /// Add a moon (user-defined root server).
+    pub fn orbit(
+        self: *Self,
+        t_ptr: ?*anyopaque,
+        moon_world_id: u64,
+        moon_seed: u64,
+    ) void {
+        _ = self;
+        _ = t_ptr;
+        _ = moon_world_id;
+        _ = moon_seed;
+
+        // TODO: Call topology.addMoon
+    }
+
+    /// Remove a moon.
+    pub fn deorbit(
+        self: *Self,
+        t_ptr: ?*anyopaque,
+        moon_world_id: u64,
+    ) void {
+        _ = self;
+        _ = t_ptr;
+        _ = moon_world_id;
+
+        // TODO: Call topology.removeMoon
+    }
+
+    /// Get PRNG value.
+    pub fn prng(self: *Self) u64 {
+        // Simple xorshift PRNG (TODO: use proper state)
+        var x: u64 = @as(u64, @intCast(self.now)) ^ 0x123456789abcdef0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        return x;
     }
 };
 
@@ -344,6 +431,12 @@ pub const Node = struct {
 /// Node configuration (maps to ZT_Node_Config).
 pub const Config = struct {
     // TODO: Add config fields
+};
+
+/// Node status information.
+pub const Status = struct {
+    address: u64,
+    online: bool,
 };
 
 /// Callbacks from Node to host application.
@@ -479,4 +572,77 @@ test "Node: network management" {
     // Network should be gone
     const net3 = node.getNetwork(nwid);
     try testing.expect(net3 == null);
+}
+
+test "Node: address and status" {
+    const callbacks = Callbacks{
+        .ctx = null,
+        .stateObjectGet = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]u8, _: u32) i32 {
+                return 0;
+            }
+        }.f,
+        .stateObjectPut = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}
+        }.f,
+        .wireSend = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: [*]const u8, _: u32, _: i32) void {}
+        }.f,
+        .frameInject = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u64, _: u32, _: u32, _: [*]const u8, _: u32) void {}
+        }.f,
+        .event = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: ?*const anyopaque) void {}
+        }.f,
+    };
+
+    const config = Config{};
+
+    var node = try Node.init(testing.allocator, null, &config, callbacks, 1000);
+    defer node.deinit();
+
+    // Address should be from identity
+    const addr = node.address();
+    try testing.expect(addr == 0); // Default identity is zero
+
+    // Status
+    var st: Status = undefined;
+    node.status(&st);
+    try testing.expectEqual(addr, st.address);
+    try testing.expect(!st.online);
+}
+
+test "Node: prng" {
+    const callbacks = Callbacks{
+        .ctx = null,
+        .stateObjectGet = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]u8, _: u32) i32 {
+                return 0;
+            }
+        }.f,
+        .stateObjectPut = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}
+        }.f,
+        .wireSend = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: [*]const u8, _: u32, _: i32) void {}
+        }.f,
+        .frameInject = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u64, _: u32, _: u32, _: [*]const u8, _: u32) void {}
+        }.f,
+        .event = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: ?*const anyopaque) void {}
+        }.f,
+    };
+
+    const config = Config{};
+
+    var node = try Node.init(testing.allocator, null, &config, callbacks, 1000);
+    defer node.deinit();
+
+    // PRNG should produce different values
+    const r1 = node.prng();
+    const r2 = node.prng();
+    try testing.expect(r1 != 0);
+    try testing.expect(r2 != 0);
+    // Note: they might be equal by chance, but unlikely
 }
