@@ -2048,16 +2048,16 @@ pub const IncomingPacket = struct {
                     var at_addr = InetAddress.InetAddress.zero();
                     if (addrlen == 4) {
                         var bytes: [4]u8 = undefined;
-                        var i: u32 = 0;
-                        while (i < 4) : (i += 1) {
-                            bytes[i] = self.pkt.buf.at(u8, packet.rendezvous_idx.idx_address + i) catch return true;
+                        var idx: u32 = 0;
+                        while (idx < 4) : (idx += 1) {
+                            bytes[idx] = self.pkt.buf.at(u8, packet.rendezvous_idx.idx_address + idx) catch return true;
                         }
                         at_addr = InetAddress.InetAddress.initV4(bytes, port);
                     } else if (addrlen == 16) {
                         var bytes: [16]u8 = undefined;
-                        var i: u32 = 0;
-                        while (i < 16) : (i += 1) {
-                            bytes[i] = self.pkt.buf.at(u8, packet.rendezvous_idx.idx_address + i) catch return true;
+                        var idx: u32 = 0;
+                        while (idx < 16) : (idx += 1) {
+                            bytes[idx] = self.pkt.buf.at(u8, packet.rendezvous_idx.idx_address + idx) catch return true;
                         }
                         at_addr = InetAddress.InetAddress.initV6(bytes, port);
                     } else {
