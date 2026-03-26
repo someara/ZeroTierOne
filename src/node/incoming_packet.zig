@@ -3028,6 +3028,52 @@ const TestContext = struct {
             .pathRateGateEchoRequest = &pathEchoGateCb,
             .traceIncomingPacketMacFailure = &traceMacFailCb,
             .traceIncomingPacketInvalid = &traceInvalidCb,
+            .traceIncomingPacketDroppedHELLO = &traceDroppedHelloCb,
+            .nodeRateGateIdentityVerification = &rateGateIdentityCb,
+            .peerIdentity = &peerIdentityCb,
+            .peerSetRemoteVersion = &peerSetRemoteVersionCb,
+            .topologyAddPeer = &topologyAddPeerCb,
+            .topologyIsUpstream = &topologyIsUpstreamCb,
+            .topologyPlanetWorldId = &topologyPlanetWorldIdCb,
+            .topologyPlanetWorldTimestamp = &topologyPlanetWorldTimestampCb,
+            .topologySerializePlanet = &topologySerializePlanetCb,
+            .topologySerializeUpdatedMoons = &topologySerializeUpdatedMoonsCb,
+            .topologyShouldAcceptWorldUpdateFrom = &topologyShouldAcceptWorldUpdateFromCb,
+            .topologyAddWorld = &topologyAddWorldCb,
+            .selfAwarenessIam = &selfAwarenessIamCb,
+            .pathUpdateLatency = &pathUpdateLatencyCb,
+            .nodeGetNetwork = &nodeGetNetworkCb,
+            .nodeExpectingReplyTo = &nodeExpectingReplyToCb,
+            .networkController = &networkControllerCb,
+            .networkSetNotFound = &networkSetNotFoundCb,
+            .networkSetAccessDenied = &networkSetAccessDeniedCb,
+            .networkGate = &networkGateCb,
+            .networkPeerRequestedCredentials = &networkPeerRequestedCredentialsCb,
+            .networkConfigHasCom = &networkConfigHasComCb,
+            .networkSetAuthenticationRequired = &networkSetAuthenticationRequiredCb,
+            .networkHandleConfigChunk = &networkHandleConfigChunkCb,
+            .multicasterRemove = &multicasterRemoveCb,
+            .multicasterAddMultiple = &multicasterAddMultipleCb,
+            .switchDoAnythingWaitingForPeer = &switchDoAnythingWaitingForPeerCb,
+            .networkAddCredentialCOM = &networkAddCredentialCOMCb,
+            .topologyAmUpstream = &topologyAmUpstreamCb,
+            .peerRateGateInboundWhoisRequest = &peerRateGateInboundWhoisRequestCb,
+            .topologyGetIdentity = &topologyGetIdentityCb,
+            .nodeShouldUsePathForZeroTierTraffic = &nodeShouldUsePathForZeroTierTrafficCb,
+            .nodePrng = &nodePrngCb,
+            .nodePutPacket = &nodePutPacketCb,
+            .peerAttemptToContactAt = &peerAttemptToContactAtCb,
+            .networkMac = &networkMacCb,
+            .networkUserPtr = &networkUserPtrCb,
+            .networkFilterIncomingPacket = &networkFilterIncomingPacketCb,
+            .pmPutFrame = &pmPutFrameCb,
+            .multicasterAdd = &multicasterAddCb,
+            .networkPushCredentials = &networkPushCredentialsCb,
+            .networkControllerHandleConfigRequest = &networkControllerHandleConfigRequestCb,
+            .networkHandleConfig = &networkHandleConfigCb,
+            .multicasterGather = &multicasterGatherCb,
+            .multicasterReceiveMulticastFrame = &multicasterReceiveMulticastFrameCb,
+            .peerReceivePushDirectPaths = &peerReceivePushDirectPathsCb,
         };
     }
 
@@ -3205,6 +3251,54 @@ const TestContext = struct {
         @memcpy(self.invalid_reason[0..copy_len], reason[0..copy_len]);
         self.invalid_reason[copy_len] = 0;
     }
+
+    // Stub callbacks for new handlers
+    fn traceDroppedHelloCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: [*:0]const u8) void {}
+    fn rateGateIdentityCb(_: ?*anyopaque, _: i64, _: *const InetAddress.InetAddress) bool { return true; }
+    fn peerIdentityCb(ctx: ?*anyopaque, _: ?*anyopaque) *const Identity { const self = ctxCast(ctx); return &self.test_identity; }
+    fn peerSetRemoteVersionCb(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: u32, _: u32, _: u32) void {}
+    fn topologyAddPeerCb(_: ?*anyopaque, _: ?*anyopaque, _: *const Identity) ?*anyopaque { return null; }
+    fn topologyIsUpstreamCb(_: ?*anyopaque, _: *const Identity) bool { return false; }
+    fn topologyPlanetWorldIdCb(_: ?*anyopaque) u64 { return 0; }
+    fn topologyPlanetWorldTimestampCb(_: ?*anyopaque) u64 { return 0; }
+    fn topologySerializePlanetCb(_: ?*anyopaque, _: [*]u8, _: u32) u32 { return 0; }
+    fn topologySerializeUpdatedMoonsCb(_: ?*anyopaque, _: [*]const u64, _: [*]const u64, _: u32, _: [*]u8, _: u32) u32 { return 0; }
+    fn topologyShouldAcceptWorldUpdateFromCb(_: ?*anyopaque, _: u64) bool { return false; }
+    fn topologyAddWorldCb(_: ?*anyopaque, _: ?*anyopaque, _: [*]const u8, _: u32) bool { return false; }
+    fn selfAwarenessIamCb(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: i64, _: *const InetAddress.InetAddress, _: *const InetAddress.InetAddress, _: bool, _: i64) void {}
+    fn pathUpdateLatencyCb(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: i64) void {}
+    fn nodeGetNetworkCb(_: ?*anyopaque, _: u64) ?*anyopaque { return null; }
+    fn nodeExpectingReplyToCb(_: ?*anyopaque, _: u64) bool { return false; }
+    fn networkControllerCb(_: ?*anyopaque, _: ?*anyopaque) u64 { return 0; }
+    fn networkSetNotFoundCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) void {}
+    fn networkSetAccessDeniedCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) void {}
+    fn networkGateCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) bool { return true; }
+    fn networkPeerRequestedCredentialsCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: i64) void {}
+    fn networkConfigHasComCb(_: ?*anyopaque, _: ?*anyopaque) bool { return false; }
+    fn networkSetAuthenticationRequiredCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: [*:0]const u8) void {}
+    fn networkHandleConfigChunkCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: [*]const u8, _: u32, _: u32) void {}
+    fn multicasterRemoveCb(_: ?*anyopaque, _: u64, _: *const [6]u8, _: u32, _: u64) void {}
+    fn multicasterAddMultipleCb(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: u64, _: *const [6]u8, _: u32, _: [*]const u8, _: u32, _: u32) void {}
+    fn switchDoAnythingWaitingForPeerCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) void {}
+    fn networkAddCredentialCOMCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: [*]const u8, _: u32) bool { return false; }
+    fn topologyAmUpstreamCb(_: ?*anyopaque) bool { return false; }
+    fn peerRateGateInboundWhoisRequestCb(_: ?*anyopaque, _: ?*anyopaque, _: i64) bool { return true; }
+    fn topologyGetIdentityCb(_: ?*anyopaque, _: ?*anyopaque, _: u64) ?*const Identity { return null; }
+    fn nodeShouldUsePathForZeroTierTrafficCb(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: i64, _: *const InetAddress.InetAddress) bool { return true; }
+    fn nodePrngCb(_: ?*anyopaque) u64 { return 0x1234567890abcdef; }
+    fn nodePutPacketCb(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress.InetAddress, _: [*]const u8, _: u32, _: u32) void {}
+    fn peerAttemptToContactAtCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress.InetAddress, _: i64, _: bool) void {}
+    fn networkMacCb(_: ?*anyopaque, _: ?*anyopaque) MAC { return MAC.init(&[_]u8{0,0,0,0,0,0}); }
+    fn networkUserPtrCb(_: ?*anyopaque, _: ?*anyopaque) ?*anyopaque { return null; }
+    fn networkFilterIncomingPacketCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: *const MAC, _: *const MAC, _: [*]const u8, _: u32, _: u32, _: u32) i32 { return 1; }
+    fn pmPutFrameCb(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: ?*anyopaque, _: *const MAC, _: *const MAC, _: u32, _: u32, _: *const anyopaque, _: u32, _: i32) void {}
+    fn multicasterAddCb(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: u64, _: *const MulticastGroup, _: u64) void {}
+    fn networkPushCredentialsCb(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: ?*anyopaque, _: i64, _: [*]const u8, _: u32) void {}
+    fn networkControllerHandleConfigRequestCb(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u64, _: *const anyopaque) void {}
+    fn networkHandleConfigCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: [*]const u8, _: u32) void {}
+    fn multicasterGatherCb(_: ?*anyopaque, _: u64, _: u64, _: *const MulticastGroup, _: *Packet, _: u32) u32 { return 0; }
+    fn multicasterReceiveMulticastFrameCb(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: *const MulticastGroup, _: [*]const u8, _: u32, _: u32) void {}
+    fn peerReceivePushDirectPathsCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: [*]const u8, _: u32, _: i64) void {}
 
     fn ctxCast(ctx: ?*anyopaque) *TestContext {
         return @ptrCast(@alignCast(ctx.?));
