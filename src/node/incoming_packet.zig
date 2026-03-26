@@ -2401,7 +2401,7 @@ pub const IncomingPacket = struct {
             }
             const adi = self.pkt.buf.at(u32, ptr + 14) catch break;
 
-            const mg = MulticastGroup.init(MAC.init(&mac_bytes), adi);
+            const mg = MulticastGroup.init(MAC.fromBytes(&mac_bytes), adi);
             const nw = cb.nodeGetNetwork(cb.ctx, nwid);
             var authorized = false;
 
@@ -2599,7 +2599,7 @@ pub const IncomingPacket = struct {
         const adi = self.pkt.buf.at(u32, mac_offset + 6) catch return true;
         const gather_limit = self.pkt.buf.at(u32, mac_offset + 10) catch return true;
 
-        const mg = MulticastGroup.init(MAC.init(&mac_bytes), adi);
+        const mg = MulticastGroup.init(MAC.fromBytes(&mac_bytes), adi);
         const nw = cb.nodeGetNetwork(cb.ctx, nwid);
 
         if (nw != null and cb.networkGate(cb.ctx, cb.tptr, nw, peer)) {
@@ -2686,7 +2686,7 @@ pub const IncomingPacket = struct {
             if (frame_offset < pkt_size) {
                 const frame_len = pkt_size - frame_offset;
                 const frame_data = self.pkt.buf.data()[frame_offset..];
-                const mg = MulticastGroup.init(MAC.init(&mac_bytes), adi);
+                const mg = MulticastGroup.init(MAC.fromBytes(&mac_bytes), adi);
 
                 cb.multicasterReceiveMulticastFrame(
                     cb.ctx,
@@ -3288,7 +3288,7 @@ const TestContext = struct {
     fn nodePrngCb(_: ?*anyopaque) u64 { return 0x1234567890abcdef; }
     fn nodePutPacketCb(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress.InetAddress, _: [*]const u8, _: u32, _: u32) void {}
     fn peerAttemptToContactAtCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress.InetAddress, _: i64, _: bool) void {}
-    fn networkMacCb(_: ?*anyopaque, _: ?*anyopaque) MAC { return MAC.init(&[_]u8{0,0,0,0,0,0}); }
+    fn networkMacCb(_: ?*anyopaque, _: ?*anyopaque) MAC { return MAC.fromBytes(&[_]u8{0,0,0,0,0,0}); }
     fn networkUserPtrCb(_: ?*anyopaque, _: ?*anyopaque) ?*anyopaque { return null; }
     fn networkFilterIncomingPacketCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: *const MAC, _: *const MAC, _: [*]const u8, _: u32, _: u32, _: u32) i32 { return 1; }
     fn pmPutFrameCb(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: ?*anyopaque, _: *const MAC, _: *const MAC, _: u32, _: u32, _: *const anyopaque, _: u32, _: i32) void {}
