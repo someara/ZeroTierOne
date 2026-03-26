@@ -2268,13 +2268,15 @@ pub const IncomingPacket = struct {
                 const from_idx = com_len + packet.ext_frame_idx.idx_from;
 
                 const ethertype = self.pkt.buf.at(u16, ethertype_idx) catch return true;
-                var to_mac: MAC = undefined;
-                var from_mac: MAC = undefined;
+                var to_bytes: [6]u8 = undefined;
+                var from_bytes: [6]u8 = undefined;
                 var i: u32 = 0;
                 while (i < 6) : (i += 1) {
-                    to_mac.data[i] = self.pkt.buf.at(u8, to_idx + i) catch return true;
-                    from_mac.data[i] = self.pkt.buf.at(u8, from_idx + i) catch return true;
+                    to_bytes[i] = self.pkt.buf.at(u8, to_idx + i) catch return true;
+                    from_bytes[i] = self.pkt.buf.at(u8, from_idx + i) catch return true;
                 }
+                const to_mac = MAC.fromBytes(&to_bytes);
+                const from_mac = MAC.fromBytes(&from_bytes);
 
                 // Check for invalid source MAC.
                 if (from_mac.isZero() or from_mac.eql(&cb.networkMac(cb.ctx, network))) {
@@ -2524,7 +2526,7 @@ pub const IncomingPacket = struct {
             cb.peerAddress(cb.ctx, peer),
             self.pkt.packetId(),
             nwid,
-            meta_ptr,
+            meta_ptr orelse @ptrCast(&[0]u8{}),
         );
 
         cb.peerReceived(
