@@ -168,10 +168,15 @@ const BondedPath = struct {
     }
 
     /// Find and calculate RTT for an ACKed packet.
+    /// Clears the entry after use to prevent stale data issues.
     pub fn findAndCalculateRTT(self: *BondedPath, packet_id: u64, now: i64) ?i64 {
-        for (self.packet_history) |record| {
+        for (&self.packet_history) |*record| {
             if (record.packet_id == packet_id and record.send_time > 0) {
-                return now - record.send_time;
+                const rtt = now - record.send_time;
+                // Clear entry to prevent reuse
+                record.packet_id = 0;
+                record.send_time = 0;
+                return rtt;
             }
         }
         return null;
@@ -466,7 +471,11 @@ pub const Bond = struct {
             if (!p.alive) continue;
 
             const quality = p.quality.calculateQuality();
-            const load_factor = @as(f32, @floatFromInt(p.quality.assigned_flow_count + 1));
+            const flow_count = p.quality.assigned_flow_count + 1;
+            // Guard against division by zero (should never happen, but be safe)
+            if (flow_count == 0) continue;
+
+            const load_factor = @as(f32, @floatFromInt(flow_count));
             const adjusted_quality = quality / load_factor;
 
             if (adjusted_quality > best_quality) {
@@ -597,7 +606,8 @@ pub const Bond = struct {
 
     /// Get total number of links.
     pub fn getNumTotalLinks(self: *const Self) u32 {
-        return @intCast(self.paths.items.len);
+        const len = self.paths.items.len;
+        return std.math.cast(u32, len) orelse std.math.maxInt(u32);
     }
 };
 

@@ -272,14 +272,18 @@ pub const Node = struct {
         _ = network;
 
         // Call switch to inject frame
+        // Validate ether_type and vlan_id fit in u16
+        const et = std.math.cast(u16, ether_type) orelse return error.InvalidEtherType;
+        const vlan = std.math.cast(u16, vlan_id) orelse return error.InvalidVlanId;
+
         const callbacks = self.createSwitchCallbacks();
         self.switch_engine.onLocalEthernet(
             t_ptr,
             nwid,
             source_mac,
             dest_mac,
-            @intCast(ether_type),
-            @intCast(vlan_id),
+            et,
+            vlan,
             data,
             len,
             now,
@@ -318,7 +322,11 @@ pub const Node = struct {
                 self.callbacks.event(self.callbacks.ctx, t_ptr, event_online, null);
             }
         } else {
-            next_task_deadline = @intCast(time_until_next_ping - time_since_last_ping);
+            const remaining = time_until_next_ping - time_since_last_ping;
+            // Guard against negative values (logic error case)
+            if (remaining > 0) {
+                next_task_deadline = @intCast(remaining);
+            }
         }
 
         // Housekeeping
