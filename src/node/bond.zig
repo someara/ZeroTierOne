@@ -173,6 +173,12 @@ const BondedPath = struct {
         for (&self.packet_history) |*record| {
             if (record.packet_id == packet_id and record.send_time > 0) {
                 const rtt = now - record.send_time;
+                // Validate RTT is positive (guard against clock skew)
+                if (rtt < 0 or rtt > 3600000) { // negative or > 1 hour is invalid
+                    record.packet_id = 0;
+                    record.send_time = 0;
+                    return null;
+                }
                 // Clear entry to prevent reuse
                 record.packet_id = 0;
                 record.send_time = 0;

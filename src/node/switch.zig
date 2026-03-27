@@ -638,7 +638,8 @@ pub const Switch = struct {
         callbacks: *const Callbacks,
     ) void {
 
-        if (len < constants.proto_min_fragment_length) return;
+        // Validate fragment length bounds (CRITICAL: prevent buffer overflow)
+        if (len < constants.proto_min_fragment_length or len > packet_mod.max_packet_length) return;
 
         // Parse fragment header
         const dest_addr = Address.fromBytes(data + 8);
