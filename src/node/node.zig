@@ -40,6 +40,19 @@ const network_autoconf_delay: i64 = constants.network_autoconf_delay;
 /// Background task granularity (ms)
 const core_timer_task_granularity: i64 = 500;
 
+/// Housekeeping period (ms)
+const housekeeping_period: i64 = 120000; // 2 minutes
+
+/// Event types (map to ZT_Event)
+const event_up: u32 = 0;
+const event_offline: u32 = 1;
+const event_online: u32 = 2;
+
+/// State object types (map to ZT_StateObjectType)
+const state_object_identity_public: u32 = 0;
+const state_object_identity_secret: u32 = 1;
+const state_object_network_config: u32 = 3;
+
 // ── Node ──────────────────────────────────────────────────────────
 
 pub const Node = struct {
@@ -81,23 +94,32 @@ pub const Node = struct {
     pub fn init(
         allocator: mem.Allocator,
         user_ptr: ?*anyopaque,
+        t_ptr: ?*anyopaque,
         config: *const Config,
         callbacks: Callbacks,
         now: i64,
     ) !Self {
         _ = config;
 
-        // For now, create a minimal node
-        // TODO: Initialize all subsystems
+        // Load or generate identity
+        const identity = try Self.loadOrGenerateIdentity(allocator, t_ptr, &callbacks);
 
+        // Initialize Switch
         const switch_engine = try allocator.create(Switch);
         errdefer allocator.destroy(switch_engine);
 
         switch_engine.* = try Switch.init(allocator);
 
-        return .{
+        // TODO: Initialize other subsystems
+        // - Topology
+        // - Multicaster
+        // - SelfAwareness
+        // - Bond
+        // - PacketMultiplexer
+
+        var node = Self{
             .allocator = allocator,
-            .identity = Identity.init(),
+            .identity = identity,
             .switch_engine = switch_engine,
             .networks = std.AutoHashMap(u64, *Network).init(allocator),
             .networks_mutex = .{},
@@ -109,6 +131,79 @@ pub const Node = struct {
             .user_ptr = user_ptr,
             .callbacks = callbacks,
         };
+
+        // Post UP event
+        node.postEvent(t_ptr, event_up);
+
+        return node;
+    }
+
+    /// Load identity from state or generate a new one.
+    fn loadOrGenerateIdentity(
+        allocator: mem.Allocator,
+        t_ptr: ?*anyopaque,
+        callbacks: *const Callbacks,
+    ) !Identity {
+        var buf: [2048]u8 = undefined;
+        var id_key: [2]u64 = .{ 0, 0 };
+
+        // Try to load existing identity
+        const n = callbacks.stateObjectGet(
+            callbacks.ctx,
+            t_ptr,
+            state_object_identity_secret,
+            &id_key,
+            &buf,
+            buf.len - 1,
+        );
+
+        if (n > 0) {
+            // Parse existing identity
+            buf[@intCast(n)] = 0;
+            const id_str = buf[0..@intCast(n)];
+
+            var identity = Identity.init();
+            if (identity.fromString(id_str)) {
+                if (identity.locallyValidate()) {
+                    return identity;
+                }
+            }
+            return error.InvalidIdentity;
+        }
+
+        // Generate new identity
+        var identity = try Identity.generate(allocator);
+        errdefer identity.deinit();
+
+        // Save to state
+        var secret_str: [512]u8 = undefined;
+        const secret_len = identity.toString(true, &secret_str);
+
+        id_key[0] = identity.address().toInt();
+        id_key[1] = 0;
+
+        callbacks.stateObjectPut(
+            callbacks.ctx,
+            t_ptr,
+            state_object_identity_secret,
+            &id_key,
+            &secret_str,
+            secret_len,
+        );
+
+        var public_str: [512]u8 = undefined;
+        const public_len = identity.toString(false, &public_str);
+
+        callbacks.stateObjectPut(
+            callbacks.ctx,
+            t_ptr,
+            state_object_identity_public,
+            &id_key,
+            &public_str,
+            public_len,
+        );
+
+        return identity;
     }
 
     /// Destroy the Node instance.
@@ -290,15 +385,46 @@ pub const Node = struct {
     ) u64 {
         self.now = now;
 
-        _ = t_ptr;
+        var next_task_deadline: u64 = ping_check_interval;
 
-        // TODO: Implement background tasks
-        // - Ping upstreams
-        // - Request network configs
-        // - Clean up old state
-        // - Bond maintenance
+        // Ping check
+        const time_since_last_ping = now - self.last_ping_check;
+        const time_until_next_ping = if (self.low_bandwidth_mode)
+            ping_check_interval * 5
+        else
+            ping_check_interval;
 
-        return ping_check_interval;
+        if (time_since_last_ping >= time_until_next_ping) {
+            self.last_ping_check = now;
+
+            // TODO: Get roots to contact
+            // TODO: Ping active peers
+            // TODO: Request network configs
+            // TODO: Check online status
+
+            // For now, just mark as online
+            if (!self.online) {
+                self.online = true;
+                self.callbacks.event(self.callbacks.ctx, t_ptr, event_online, null);
+            }
+        } else {
+            next_task_deadline = @intCast(time_until_next_ping - time_since_last_ping);
+        }
+
+        // Housekeeping
+        if ((now - self.last_housekeeping_run) >= housekeeping_period) {
+            self.last_housekeeping_run = now;
+
+            // TODO: Call topology.doPeriodicTasks
+            // TODO: Call self_awareness.clean
+            // TODO: Call multicaster.clean
+        }
+
+        // Switch timer tasks
+        // TODO: Create proper callbacks and call switch_engine.doTimerTasks
+        const switch_deadline = ping_check_interval; // Placeholder
+
+        return @min(next_task_deadline, switch_deadline);
     }
 
     /// Get a network by ID.
@@ -424,6 +550,60 @@ pub const Node = struct {
         x ^= x << 17;
         return x;
     }
+
+    /// Check if a path should be used for ZeroTier traffic.
+    pub fn shouldUsePathForZeroTierTraffic(
+        self: *Self,
+        t_ptr: ?*anyopaque,
+        zt_addr: Address,
+        local_socket: i64,
+        remote_addr: *const InetAddress,
+    ) bool {
+        _ = self;
+        _ = t_ptr;
+        _ = zt_addr;
+        _ = local_socket;
+
+        // Basic validation
+        if (!remote_addr.isValid()) {
+            return false;
+        }
+
+        // TODO: Check topology for prohibited endpoints
+        // TODO: Check networks for conflicts with static IPs
+        // TODO: Call pathCheckFunction callback if provided
+
+        return true;
+    }
+
+    /// Send a user message to another node.
+    pub fn sendUserMessage(
+        self: *Self,
+        t_ptr: ?*anyopaque,
+        dest: u64,
+        type_id: u64,
+        data: [*]const u8,
+        len: u32,
+    ) bool {
+        if (self.identity.address().toInt() == dest) {
+            return false;
+        }
+
+        _ = t_ptr;
+        _ = type_id;
+        _ = data;
+        _ = len;
+
+        // TODO: Create USER_MESSAGE packet
+        // TODO: Send via switch
+
+        return true;
+    }
+
+    /// Post an event to the application.
+    fn postEvent(self: *Self, t_ptr: ?*anyopaque, event_type: u32) void {
+        self.callbacks.event(self.callbacks.ctx, t_ptr, event_type, null);
+    }
 };
 
 // ── Configuration ─────────────────────────────────────────────────
@@ -502,7 +682,7 @@ test "Node: init/deinit" {
         .ctx = null,
         .stateObjectGet = struct {
             fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]u8, _: u32) i32 {
-                return 0;
+                return 0; // No stored identity
             }
         }.f,
         .stateObjectPut = struct {
@@ -521,7 +701,7 @@ test "Node: init/deinit" {
 
     const config = Config{};
 
-    var node = try Node.init(testing.allocator, null, &config, callbacks, 1000);
+    var node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
     defer node.deinit();
 
     try testing.expectEqual(@as(i64, 1000), node.now);
@@ -552,7 +732,7 @@ test "Node: network management" {
 
     const config = Config{};
 
-    var node = try Node.init(testing.allocator, null, &config, callbacks, 1000);
+    var node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
     defer node.deinit();
 
     const nwid: u64 = 0x8056c2e21c000001;
@@ -598,7 +778,7 @@ test "Node: address and status" {
 
     const config = Config{};
 
-    var node = try Node.init(testing.allocator, null, &config, callbacks, 1000);
+    var node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
     defer node.deinit();
 
     // Address should be from identity
@@ -636,7 +816,7 @@ test "Node: prng" {
 
     const config = Config{};
 
-    var node = try Node.init(testing.allocator, null, &config, callbacks, 1000);
+    var node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
     defer node.deinit();
 
     // PRNG should produce different values
