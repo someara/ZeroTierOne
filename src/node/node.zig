@@ -808,6 +808,85 @@ pub const Node = struct {
     pub fn freeQueryResult(allocator: mem.Allocator, result: anytype) void {
         allocator.free(result);
     }
+
+    /// Check if node belongs to a network.
+    pub fn belongsToNetwork(self: *Self, nwid: u64) bool {
+        self.networks_mutex.lock();
+        defer self.networks_mutex.unlock();
+        return self.networks.contains(nwid);
+    }
+
+    /// Get all networks.
+    pub fn allNetworks(self: *Self, allocator: mem.Allocator) ![]u64 {
+        return self.listNetworks(allocator);
+    }
+
+    /// Send a packet on the wire.
+    pub fn putPacket(
+        self: *Self,
+        t_ptr: ?*anyopaque,
+        local_socket: i64,
+        addr: *const InetAddress,
+        data: [*]const u8,
+        len: u32,
+        ttl: i32,
+    ) void {
+        self.callbacks.wireSend(
+            self.callbacks.ctx,
+            t_ptr,
+            local_socket,
+            addr,
+            data,
+            len,
+            ttl,
+        );
+    }
+
+    /// Inject a frame into virtual network.
+    pub fn putFrame(
+        self: *Self,
+        t_ptr: ?*anyopaque,
+        nwid: u64,
+        user_ptr: ?*?*anyopaque,
+        source: *const MAC,
+        dest: *const MAC,
+        ether_type: u32,
+        vlan_id: u32,
+        data: [*]const u8,
+        len: u32,
+    ) void {
+        _ = user_ptr;
+        self.callbacks.frameInject(
+            self.callbacks.ctx,
+            t_ptr,
+            nwid,
+            source.toInt(),
+            dest.toInt(),
+            ether_type,
+            vlan_id,
+            data,
+            len,
+        );
+    }
+
+    /// Configure a virtual network port.
+    pub fn configureVirtualNetworkPort(
+        self: *Self,
+        t_ptr: ?*anyopaque,
+        nwid: u64,
+        user_ptr: ?*?*anyopaque,
+        operation: u32,
+        config: ?*const anyopaque,
+    ) i32 {
+        _ = self;
+        _ = t_ptr;
+        _ = nwid;
+        _ = user_ptr;
+        _ = operation;
+        _ = config;
+        // TODO: Call virtualNetworkConfigFunction callback
+        return 0;
+    }
 };
 
 // ── Configuration ─────────────────────────────────────────────────
@@ -1089,4 +1168,52 @@ test "Node: network list" {
     defer testing.allocator.free(list);
 
     try testing.expectEqual(@as(usize, 2), list.len);
+}
+
+test "Node: belongsToNetwork" {
+    const callbacks = Callbacks{
+        .ctx = null,
+        .stateObjectGet = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]u8, _: u32) i32 {
+                return 0;
+            }
+        }.f,
+        .stateObjectPut = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}
+        }.f,
+        .stateObjectDelete = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64) void {}
+        }.f,
+        .wireSend = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: [*]const u8, _: u32, _: i32) void {}
+        }.f,
+        .frameInject = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u64, _: u32, _: u32, _: [*]const u8, _: u32) void {}
+        }.f,
+        .event = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: ?*const anyopaque) void {}
+        }.f,
+    };
+
+    const config = Config{};
+
+    var node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
+    defer node.deinit();
+
+    const nwid: u64 = 0x8056c2e21c000001;
+
+    // Should not belong initially
+    try testing.expect(!node.belongsToNetwork(nwid));
+
+    // Join network
+    _ = try node.joinNetwork(nwid);
+
+    // Should belong now
+    try testing.expect(node.belongsToNetwork(nwid));
+
+    // Leave network
+    node.leaveNetwork(null, nwid, null);
+
+    // Should not belong anymore
+    try testing.expect(!node.belongsToNetwork(nwid));
 }
