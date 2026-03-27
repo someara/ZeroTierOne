@@ -235,108 +235,8 @@ pub const Node = struct {
     ) void {
         self.now = now;
 
-        // TODO: Create Switch callbacks
-        const switch_callbacks = Switch.Callbacks{
-            .ctx = @ptrCast(self),
-            .lookupPeer = struct {
-                fn f(_: ?*anyopaque, _: Address) ?*anyopaque {
-                    return null;
-                }
-            }.f,
-            .sendViaPeer = struct {
-                fn f(_: ?*anyopaque, _: *anyopaque, _: *const @import("packet.zig").Packet, _: bool, _: i64, _: i32) void {}
-            }.f,
-            .peerAddress = struct {
-                fn f(_: *anyopaque) Address {
-                    return Address.init(0);
-                }
-            }.f,
-            .isUpstream = struct {
-                fn f(_: ?*anyopaque, _: Address) bool {
-                    return false;
-                }
-            }.f,
-            .getNetwork = struct {
-                fn f(_: ?*anyopaque, _: u64) ?*anyopaque {
-                    return null;
-                }
-            }.f,
-            .networkHasConfig = struct {
-                fn f(_: *anyopaque) bool {
-                    return false;
-                }
-            }.f,
-            .networkMac = struct {
-                fn f(_: *anyopaque) MAC {
-                    return MAC.init(0);
-                }
-            }.f,
-            .networkId = struct {
-                fn f(_: *anyopaque) u64 {
-                    return 0;
-                }
-            }.f,
-            .networkPermitsBridging = struct {
-                fn f(_: *anyopaque, _: Address) bool {
-                    return false;
-                }
-            }.f,
-            .networkQosEnabled = struct {
-                fn f(_: *anyopaque) bool {
-                    return false;
-                }
-            }.f,
-            .myAddress = struct {
-                fn f(ctx: ?*anyopaque) Address {
-                    const node: *Self = @ptrCast(@alignCast(ctx.?));
-                    return node.identity.address();
-                }
-            }.f,
-            .macToAddress = struct {
-                fn f(mac: *const MAC, nwid: u64) Address {
-                    return mac.toAddress(nwid);
-                }
-            }.f,
-            .createPacket = struct {
-                fn f(dest: Address, src: Address, verb: u8) @import("packet.zig").Packet {
-                    var pkt = @import("packet.zig").Packet.init();
-                    pkt.setDestination(dest);
-                    pkt.setSource(src);
-                    pkt.setVerb(verb);
-                    return pkt;
-                }
-            }.f,
-            .packetAppendNetworkId = struct {
-                fn f(_: *@import("packet.zig").Packet, _: u64) void {}
-            }.f,
-            .packetAppendEtherType = struct {
-                fn f(_: *@import("packet.zig").Packet, _: u16) void {}
-            }.f,
-            .packetAppendData = struct {
-                fn f(_: *@import("packet.zig").Packet, _: [*]const u8, _: u32) void {}
-            }.f,
-            .packetAppendByte = struct {
-                fn f(_: *@import("packet.zig").Packet, _: u8) void {}
-            }.f,
-            .packetAppendMAC = struct {
-                fn f(_: *@import("packet.zig").Packet, _: *const MAC) void {}
-            }.f,
-            .putFrame = struct {
-                fn f(_: ?*anyopaque, _: u64, _: *anyopaque, _: *const MAC, _: *const MAC, _: u32, _: u32, _: [*]const u8, _: u32) void {}
-            }.f,
-            .multicastSend = struct {
-                fn f(_: ?*anyopaque, _: *anyopaque, _: *const MAC, _: *const MAC, _: u32, _: u32, _: [*]const u8, _: u32, _: bool) void {}
-            }.f,
-            .pathReceived = struct {
-                fn f(_: ?*anyopaque, _: i64, _: *const InetAddress, _: i64) void {}
-            }.f,
-            .now = struct {
-                fn f(ctx: ?*anyopaque) i64 {
-                    const node: *Self = @ptrCast(@alignCast(ctx.?));
-                    return node.now;
-                }
-            }.f,
-        };
+        // Create proper Switch callbacks
+        const switch_callbacks = self.createSwitchCallbacks();
 
         self.switch_engine.onRemotePacket(
             t_ptr,
@@ -603,6 +503,183 @@ pub const Node = struct {
     /// Post an event to the application.
     fn postEvent(self: *Self, t_ptr: ?*anyopaque, event_type: u32) void {
         self.callbacks.event(self.callbacks.ctx, t_ptr, event_type, null);
+    }
+
+    /// Create Switch callbacks that route to Node methods.
+    fn createSwitchCallbacks(self: *Self) Switch.Callbacks {
+        return Switch.Callbacks{
+            .ctx = @ptrCast(self),
+
+            .lookupPeer = struct {
+                fn f(_: ?*anyopaque, _: Address) ?*anyopaque {
+                    // TODO: Call topology.getPeer
+                    return null;
+                }
+            }.f,
+
+            .sendViaPeer = struct {
+                fn f(_: ?*anyopaque, _: *anyopaque, _: *const @import("packet.zig").Packet, _: bool, _: i64, _: i32) void {
+                    // TODO: Implement peer send
+                }
+            }.f,
+
+            .peerAddress = struct {
+                fn f(_: *anyopaque) Address {
+                    // TODO: Get peer address
+                    return Address.init(0);
+                }
+            }.f,
+
+            .isUpstream = struct {
+                fn f(_: ?*anyopaque, _: Address) bool {
+                    // TODO: Call topology.isUpstream
+                    return false;
+                }
+            }.f,
+
+            .getNetwork = struct {
+                fn f(ctx: ?*anyopaque, nwid: u64) ?*anyopaque {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return @ptrCast(node.getNetwork(nwid));
+                }
+            }.f,
+
+            .networkHasConfig = struct {
+                fn f(network: *anyopaque) bool {
+                    const net: *Network = @ptrCast(@alignCast(network));
+                    return net.hasConfig();
+                }
+            }.f,
+
+            .networkMac = struct {
+                fn f(network: *anyopaque) MAC {
+                    const net: *Network = @ptrCast(@alignCast(network));
+                    return net.mac();
+                }
+            }.f,
+
+            .networkId = struct {
+                fn f(network: *anyopaque) u64 {
+                    const net: *Network = @ptrCast(@alignCast(network));
+                    return net.id();
+                }
+            }.f,
+
+            .networkPermitsBridging = struct {
+                fn f(network: *anyopaque, addr: Address) bool {
+                    const net: *Network = @ptrCast(@alignCast(network));
+                    return net.permitsBridging(addr);
+                }
+            }.f,
+
+            .networkQosEnabled = struct {
+                fn f(network: *anyopaque) bool {
+                    const net: *Network = @ptrCast(@alignCast(network));
+                    return net.qosEnabled();
+                }
+            }.f,
+
+            .myAddress = struct {
+                fn f(ctx: ?*anyopaque) Address {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return node.identity.address();
+                }
+            }.f,
+
+            .macToAddress = struct {
+                fn f(mac: *const MAC, nwid: u64) Address {
+                    return mac.toAddress(nwid);
+                }
+            }.f,
+
+            .createPacket = struct {
+                fn f(dest: Address, src: Address, verb: u8) @import("packet.zig").Packet {
+                    const pkt = @import("packet.zig").Packet.init();
+                    // TODO: Set destination, source, verb
+                    _ = dest;
+                    _ = src;
+                    _ = verb;
+                    return pkt;
+                }
+            }.f,
+
+            .packetAppendNetworkId = struct {
+                fn f(pkt: *@import("packet.zig").Packet, nwid: u64) void {
+                    _ = pkt;
+                    _ = nwid;
+                    // TODO: Append to packet
+                }
+            }.f,
+
+            .packetAppendEtherType = struct {
+                fn f(pkt: *@import("packet.zig").Packet, et: u16) void {
+                    _ = pkt;
+                    _ = et;
+                    // TODO: Append to packet
+                }
+            }.f,
+
+            .packetAppendData = struct {
+                fn f(pkt: *@import("packet.zig").Packet, data: [*]const u8, len: u32) void {
+                    _ = pkt;
+                    _ = data;
+                    _ = len;
+                    // TODO: Append to packet
+                }
+            }.f,
+
+            .packetAppendByte = struct {
+                fn f(pkt: *@import("packet.zig").Packet, b: u8) void {
+                    _ = pkt;
+                    _ = b;
+                    // TODO: Append to packet
+                }
+            }.f,
+
+            .packetAppendMAC = struct {
+                fn f(pkt: *@import("packet.zig").Packet, mac: *const MAC) void {
+                    _ = pkt;
+                    _ = mac;
+                    // TODO: Append to packet
+                }
+            }.f,
+
+            .putFrame = struct {
+                fn f(ctx: ?*anyopaque, nwid: u64, _: *anyopaque, from: *const MAC, to: *const MAC, ether_type: u32, vlan_id: u32, data: [*]const u8, len: u32) void {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    node.callbacks.frameInject(
+                        node.callbacks.ctx,
+                        null,
+                        nwid,
+                        from.toInt(),
+                        to.toInt(),
+                        ether_type,
+                        vlan_id,
+                        data,
+                        len,
+                    );
+                }
+            }.f,
+
+            .multicastSend = struct {
+                fn f(_: ?*anyopaque, _: *anyopaque, _: *const MAC, _: *const MAC, _: u32, _: u32, _: [*]const u8, _: u32, _: bool) void {
+                    // TODO: Implement multicast send via multicaster
+                }
+            }.f,
+
+            .pathReceived = struct {
+                fn f(_: ?*anyopaque, _: i64, _: *const InetAddress, _: i64) void {
+                    // TODO: Update path timestamp via topology
+                }
+            }.f,
+
+            .now = struct {
+                fn f(ctx: ?*anyopaque) i64 {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return node.now;
+                }
+            }.f,
+        };
     }
 };
 
