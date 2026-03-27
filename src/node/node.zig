@@ -89,6 +89,9 @@ pub const Node = struct {
     // Callbacks to host application
     callbacks: Callbacks,
 
+    // PRNG state for generating random values
+    prng_state: u64,
+
     const Self = @This();
 
     /// Create a new Node instance.
@@ -131,6 +134,7 @@ pub const Node = struct {
             .last_housekeeping_run = 0,
             .user_ptr = user_ptr,
             .callbacks = callbacks,
+            .prng_state = @as(u64, @bitCast(now)) ^ identity.address().toInt(),
         };
 
         // Post UP event
@@ -265,17 +269,22 @@ pub const Node = struct {
         self.now = now;
 
         const network = self.getNetwork(nwid) orelse return error.NetworkNotFound;
-
-        _ = t_ptr;
         _ = network;
-        _ = source_mac;
-        _ = dest_mac;
-        _ = ether_type;
-        _ = vlan_id;
-        _ = data;
-        _ = len;
 
-        // TODO: Call switch_engine.onLocalEthernet
+        // Call switch to inject frame
+        const callbacks = self.createSwitchCallbacks();
+        self.switch_engine.onLocalEthernet(
+            t_ptr,
+            nwid,
+            source_mac,
+            dest_mac,
+            @intCast(ether_type),
+            @intCast(vlan_id),
+            data,
+            len,
+            now,
+            &callbacks,
+        );
     }
 
     /// Run periodic background tasks.
@@ -316,14 +325,17 @@ pub const Node = struct {
         if ((now - self.last_housekeeping_run) >= housekeeping_period) {
             self.last_housekeeping_run = now;
 
-            // TODO: Call topology.doPeriodicTasks
-            // TODO: Call self_awareness.clean
-            // TODO: Call multicaster.clean
+            // Periodic housekeeping tasks
+            // (Topology, SelfAwareness, Multicaster would be called here when implemented)
         }
 
         // Switch timer tasks
-        // TODO: Create proper callbacks and call switch_engine.doTimerTasks
-        const switch_deadline = ping_check_interval; // Placeholder
+        const switch_callbacks = self.createSwitchCallbacks();
+        const switch_deadline = self.switch_engine.doTimerTasks(
+            t_ptr,
+            now,
+            &switch_callbacks,
+        );
 
         return @min(next_task_deadline, switch_deadline);
     }
@@ -549,14 +561,15 @@ pub const Node = struct {
         // TODO: Call topology.removeMoon
     }
 
-    /// Get PRNG value.
+    /// Get PRNG value using xorshift64*.
     pub fn prng(self: *Self) u64 {
-        // Simple xorshift PRNG (TODO: use proper state)
-        var x: u64 = @as(u64, @intCast(self.now)) ^ 0x123456789abcdef0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        return x;
+        // xorshift64* algorithm
+        var x = self.prng_state;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.prng_state = x;
+        return x *% 0x2545F4914F6CDD1D;
     }
 
     /// Check if a path should be used for ZeroTier traffic.
@@ -893,7 +906,8 @@ pub const Node = struct {
 
 /// Node configuration (maps to ZT_Node_Config).
 pub const Config = struct {
-    // TODO: Add config fields
+    // Configuration fields would go here
+    // For now, this is a placeholder struct
 };
 
 /// Node status information.

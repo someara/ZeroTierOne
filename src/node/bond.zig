@@ -128,6 +128,12 @@ const PathQuality = struct {
     }
 };
 
+/// Packet tracking entry for RTT calculation.
+const PacketRecord = struct {
+    packet_id: u64,
+    send_time: i64,
+};
+
 /// Bonded path information.
 const BondedPath = struct {
     path: *anyopaque,
@@ -136,6 +142,10 @@ const BondedPath = struct {
     last_activity: i64,
     alive: bool,
 
+    // RTT tracking (ring buffer of recent packets)
+    packet_history: [16]PacketRecord,
+    packet_history_idx: usize,
+
     pub fn init(path: *anyopaque, mode: LinkMode) BondedPath {
         return .{
             .path = path,
@@ -143,7 +153,28 @@ const BondedPath = struct {
             .mode = mode,
             .last_activity = 0,
             .alive = true,
+            .packet_history = [_]PacketRecord{.{ .packet_id = 0, .send_time = 0 }} ** 16,
+            .packet_history_idx = 0,
         };
+    }
+
+    /// Record packet send for RTT tracking.
+    pub fn recordSend(self: *BondedPath, packet_id: u64, now: i64) void {
+        self.packet_history[self.packet_history_idx] = .{
+            .packet_id = packet_id,
+            .send_time = now,
+        };
+        self.packet_history_idx = (self.packet_history_idx + 1) % self.packet_history.len;
+    }
+
+    /// Find and calculate RTT for an ACKed packet.
+    pub fn findAndCalculateRTT(self: *BondedPath, packet_id: u64, now: i64) ?i64 {
+        for (self.packet_history) |record| {
+            if (record.packet_id == packet_id and record.send_time > 0) {
+                return now - record.send_time;
+            }
+        }
+        return null;
     }
 };
 
@@ -506,11 +537,10 @@ pub const Bond = struct {
     pub fn recordOutgoingPacket(
         self: *Self,
         path: *anyopaque,
-        _packet_id: u64,
+        packet_id: u64,
         len: u32,
         now: i64,
     ) void {
-        _ = _packet_id;
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -521,7 +551,7 @@ pub const Bond = struct {
         for (self.paths.items) |*p| {
             if (p.path == path) {
                 p.last_activity = now;
-                // TODO: Store packet_id → timestamp mapping for RTT calculation
+                p.recordSend(packet_id, now);
                 break;
             }
         }
@@ -531,11 +561,9 @@ pub const Bond = struct {
     pub fn recordIncomingAck(
         self: *Self,
         path: *anyopaque,
-        _packet_id: u64,
+        packet_id: u64,
         now: i64,
     ) void {
-        _ = _packet_id;
-
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -545,10 +573,14 @@ pub const Bond = struct {
                 p.last_activity = now;
                 p.alive = true;
 
-                // TODO: Calculate actual RTT from packet_id → timestamp map
-                // For now, assume successful ACK improves quality
-                const latency: f32 = 10.0; // Placeholder
-                p.quality.update(latency, 0.0, 0.0);
+                // Calculate actual RTT from packet history
+                if (p.findAndCalculateRTT(packet_id, now)) |rtt| {
+                    const latency: f32 = @floatFromInt(rtt);
+                    p.quality.update(latency, 0.0, 0.0);
+                } else {
+                    // Packet not found in history, assume good quality
+                    p.quality.update(10.0, 0.0, 0.0);
+                }
                 break;
             }
         }
