@@ -422,6 +422,59 @@ pub const Node = struct {
         return list;
     }
 
+    /// Initialize multithreading (for PacketMultiplexer).
+    pub fn initMultithreading(
+        self: *Self,
+        concurrency: u32,
+        cpu_pinning_enabled: bool,
+    ) void {
+        _ = self;
+        _ = concurrency;
+        _ = cpu_pinning_enabled;
+        // TODO: Call packet_multiplexer.setUpPostDecodeReceiveThreads
+    }
+
+    /// Set network controller instance.
+    pub fn setNetconfMaster(
+        self: *Self,
+        controller_instance: ?*anyopaque,
+    ) void {
+        _ = self;
+        _ = controller_instance;
+        // TODO: Set local network controller
+    }
+
+    /// Add a local interface address for path selection.
+    pub fn addLocalInterfaceAddress(
+        self: *Self,
+        addr: *const InetAddress,
+    ) bool {
+        _ = self;
+
+        if (!addr.isValid()) {
+            return false;
+        }
+
+        // TODO: Add to direct paths list
+        return true;
+    }
+
+    /// Clear all local interface addresses.
+    pub fn clearLocalInterfaceAddresses(self: *Self) void {
+        _ = self;
+        // TODO: Clear direct paths list
+    }
+
+    /// Set low bandwidth mode.
+    pub fn setLowBandwidthMode(self: *Self, enabled: bool) void {
+        self.low_bandwidth_mode = enabled;
+    }
+
+    /// Check if online.
+    pub fn isOnline(self: *const Self) bool {
+        return self.online;
+    }
+
     /// Get node's ZeroTier address.
     pub fn address(self: *const Self) u64 {
         return self.identity.address().toInt();
@@ -735,6 +788,25 @@ pub const Node = struct {
                 }
             }.f,
         };
+    }
+
+    /// Get planet (root server world).
+    pub fn getPlanet(self: *const Self) ?*const anyopaque {
+        _ = self;
+        // TODO: Return topology.planet()
+        return null;
+    }
+
+    /// Get moons (user root servers).
+    pub fn getMoons(self: *Self, allocator: mem.Allocator) ![]u64 {
+        _ = self;
+        // TODO: Get from topology
+        return try allocator.alloc(u64, 0);
+    }
+
+    /// Free a query result.
+    pub fn freeQueryResult(allocator: mem.Allocator, result: anytype) void {
+        allocator.free(result);
     }
 };
 
