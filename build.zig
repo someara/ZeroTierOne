@@ -239,4 +239,33 @@ pub fn build(b: *std.Build) void {
         const run_t = b.addRunArtifact(t);
         test_step.dependOn(&run_t.step);
     }
+
+    // ---------------------------------------------------------------
+    // Zig demonstration executable (`zig build zig-demo`)
+    // ---------------------------------------------------------------
+    // Demonstrates the converted Zig modules working together on Mac/Linux.
+    // Shows Node initialization, identity generation, packet operations,
+    // and cross-platform compatibility.
+
+    const demo_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Demo needs access to constants.zig which uses @cImport
+    demo_mod.addIncludePath(b.path("."));
+
+    const demo_exe = b.addExecutable(.{
+        .name = "zerotier-zig-demo",
+        .root_module = demo_mod,
+    });
+
+    b.installArtifact(demo_exe);
+
+    // `zig build zig-demo` -- build and run the Zig demonstration
+    const run_demo = b.addRunArtifact(demo_exe);
+    run_demo.step.dependOn(b.getInstallStep());
+    const demo_step = b.step("zig-demo", "Build and run the ZeroTier Zig demonstration");
+    demo_step.dependOn(&run_demo.step);
 }

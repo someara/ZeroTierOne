@@ -186,6 +186,7 @@ const ManagedQueue = struct {
 
 /// Per-network QoS state for fq_codel.
 const NetworkQoSControlBlock = struct {
+    allocator: mem.Allocator,
     curr_enqueued_packets: i32,
     new_queues: std.ArrayList(*ManagedQueue),
     old_queues: std.ArrayList(*ManagedQueue),
@@ -193,6 +194,7 @@ const NetworkQoSControlBlock = struct {
 
     pub fn init(allocator: mem.Allocator) NetworkQoSControlBlock {
         return .{
+            .allocator = allocator,
             .curr_enqueued_packets = 0,
             .new_queues = std.ArrayList(*ManagedQueue).init(allocator),
             .old_queues = std.ArrayList(*ManagedQueue).init(allocator),
@@ -201,9 +203,9 @@ const NetworkQoSControlBlock = struct {
     }
 
     pub fn deinit(self: *NetworkQoSControlBlock) void {
-        self.new_queues.deinit();
-        self.old_queues.deinit();
-        self.inactive_queues.deinit();
+        self.new_queues.deinit(self.allocator);
+        self.old_queues.deinit(self.allocator);
+        self.inactive_queues.deinit(self.allocator);
     }
 };
 
@@ -277,15 +279,15 @@ pub const Switch = struct {
             .allocator = allocator,
             .last_beacon_response = 0,
             .last_checked_queues = 0,
-            .last_sent_whois_request = Hashtable(Address, i64).init(64),
+            .last_sent_whois_request = Hashtable(Address, i64).init(allocator),
             .last_sent_whois_request_mutex = .{},
             .rx_queue = rx_queue,
-            .rx_queue_ptr = AtomicCounter.init(),
-            .tx_queue = std.ArrayList(TXQueueEntry).init(allocator),
+            .rx_queue_ptr = .{},
+            .tx_queue = std.ArrayList(TXQueueEntry){},
             .tx_queue_mutex = .{},
             .aqm_mutex = .{},
             .net_queue_control_block = std.AutoHashMap(u64, *NetworkQoSControlBlock).init(allocator),
-            .last_unite_attempt = Hashtable(LastUniteKey, u64).init(8),
+            .last_unite_attempt = Hashtable(LastUniteKey, u64).init(allocator),
             .last_unite_attempt_mutex = .{},
         };
     }
@@ -294,7 +296,7 @@ pub const Switch = struct {
     pub fn deinit(self: *Self) void {
         self.last_sent_whois_request.deinit();
 
-        self.tx_queue.deinit();
+        self.tx_queue.deinit(self.allocator);
 
         var iter = self.net_queue_control_block.valueIterator();
         while (iter.next()) |block_ptr| {
@@ -536,7 +538,7 @@ pub const Switch = struct {
 
         // Try to send queued packets
         var need_whois = std.ArrayList(Address).init(self.allocator);
-        defer need_whois.deinit();
+        defer need_whois.deinit(self.allocator);
 
         self.tx_queue_mutex.lock();
         var i: usize = 0;

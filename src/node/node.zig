@@ -20,7 +20,8 @@ const mem = std.mem;
 const testing = std.testing;
 
 const Address = @import("address.zig").Address;
-const Identity = @import("identity.zig").Identity;
+const identity_mod = @import("identity.zig");
+const Identity = identity_mod.Identity;
 const InetAddress = @import("inet_address.zig").InetAddress;
 const MAC = @import("mac.zig").MAC;
 const Network = @import("network.zig").Network;
@@ -167,9 +168,8 @@ pub const Node = struct {
             buf[@intCast(n)] = 0;
             const id_str = buf[0..@intCast(n)];
 
-            var identity = Identity.init();
-            if (identity.fromString(id_str)) {
-                if (identity.locallyValidate()) {
+            if (Identity.fromString(id_str)) |identity| {
+                if (identity.locallyValidate(allocator) catch false) {
                     return identity;
                 }
             }
@@ -181,8 +181,8 @@ pub const Node = struct {
         errdefer identity.deinit();
 
         // Save to state
-        var secret_str: [512]u8 = undefined;
-        const secret_len = identity.toString(true, &secret_str);
+        var secret_buf: [identity_mod.string_buffer_length]u8 = undefined;
+        const secret_str = identity.toString(true, &secret_buf);
 
         id_key[0] = identity.address().toInt();
         id_key[1] = 0;
@@ -192,20 +192,20 @@ pub const Node = struct {
             t_ptr,
             state_object_identity_secret,
             &id_key,
-            &secret_str,
-            secret_len,
+            secret_str.ptr,
+            @intCast(secret_str.len),
         );
 
-        var public_str: [512]u8 = undefined;
-        const public_len = identity.toString(false, &public_str);
+        var public_buf: [identity_mod.string_buffer_length]u8 = undefined;
+        const public_str = identity.toString(false, &public_buf);
 
         callbacks.stateObjectPut(
             callbacks.ctx,
             t_ptr,
             state_object_identity_public,
             &id_key,
-            &public_str,
-            public_len,
+            public_str.ptr,
+            @intCast(public_str.len),
         );
 
         return identity;
