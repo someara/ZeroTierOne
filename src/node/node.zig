@@ -24,6 +24,7 @@ const Identity = @import("identity.zig").Identity;
 const InetAddress = @import("inet_address.zig").InetAddress;
 const MAC = @import("mac.zig").MAC;
 const Network = @import("network.zig").Network;
+const NetworkConfig = @import("network_config.zig").NetworkConfig;
 const Switch = @import("switch.zig").Switch;
 const Mutex = @import("mutex.zig");
 const Hashtable = @import("hashtable.zig").Hashtable;
@@ -354,17 +355,71 @@ pub const Node = struct {
     }
 
     /// Leave a network.
-    pub fn leaveNetwork(self: *Self, nwid: u64) void {
+    pub fn leaveNetwork(
+        self: *Self,
+        t_ptr: ?*anyopaque,
+        nwid: u64,
+        user_ptr_out: ?*?*anyopaque,
+    ) void {
+        self.networks_mutex.lock();
+
+        if (self.networks.fetchRemove(nwid)) |kv| {
+            const network = kv.value;
+
+            // Return user pointer if requested
+            if (user_ptr_out) |out| {
+                out.* = network.userPtr();
+            }
+
+            // Notify application
+            // TODO: Get network config and send DESTROY event
+
+            self.networks_mutex.unlock();
+
+            network.deinit();
+            self.allocator.destroy(network);
+        } else {
+            self.networks_mutex.unlock();
+        }
+
+        // Delete state
+        var id_key: [2]u64 = .{ nwid, 0 };
+        self.callbacks.stateObjectDelete(
+            self.callbacks.ctx,
+            t_ptr,
+            state_object_network_config,
+            &id_key,
+        );
+    }
+
+    /// Get network configuration.
+    pub fn getNetworkConfig(self: *Self, nwid: u64) ?*NetworkConfig {
         self.networks_mutex.lock();
         defer self.networks_mutex.unlock();
 
-        if (self.networks.fetchRemove(nwid)) |kv| {
-            kv.value.deinit();
-            self.allocator.destroy(kv.value);
+        if (self.getNetwork(nwid)) |network| {
+            // TODO: Return network config
+            _ = network;
+            return null;
+        }
+        return null;
+    }
+
+    /// List all networks.
+    pub fn listNetworks(self: *Self, allocator: mem.Allocator) ![]u64 {
+        self.networks_mutex.lock();
+        defer self.networks_mutex.unlock();
+
+        var list = try allocator.alloc(u64, self.networks.count());
+        var iter = self.networks.keyIterator();
+        var i: usize = 0;
+
+        while (iter.next()) |nwid| {
+            list[i] = nwid.*;
+            i += 1;
         }
 
-        // TODO: Notify via callback
-        // TODO: Delete state object
+        return list;
     }
 
     /// Get node's ZeroTier address.
@@ -719,6 +774,13 @@ pub const Callbacks = struct {
         len: u32,
     ) void,
 
+    stateObjectDelete: *const fn (
+        ctx: ?*anyopaque,
+        t_ptr: ?*anyopaque,
+        object_type: u32,
+        id: [*]const u64,
+    ) void,
+
     // Wire send callback
     wireSend: *const fn (
         ctx: ?*anyopaque,
@@ -765,6 +827,9 @@ test "Node: init/deinit" {
         .stateObjectPut = struct {
             fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}
         }.f,
+        .stateObjectDelete = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64) void {}
+        }.f,
         .wireSend = struct {
             fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: [*]const u8, _: u32, _: i32) void {}
         }.f,
@@ -795,6 +860,9 @@ test "Node: network management" {
         }.f,
         .stateObjectPut = struct {
             fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}
+        }.f,
+        .stateObjectDelete = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64) void {}
         }.f,
         .wireSend = struct {
             fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: [*]const u8, _: u32, _: i32) void {}
@@ -842,6 +910,9 @@ test "Node: address and status" {
         .stateObjectPut = struct {
             fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}
         }.f,
+        .stateObjectDelete = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64) void {}
+        }.f,
         .wireSend = struct {
             fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: [*]const u8, _: u32, _: i32) void {}
         }.f,
@@ -880,6 +951,9 @@ test "Node: prng" {
         .stateObjectPut = struct {
             fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}
         }.f,
+        .stateObjectDelete = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64) void {}
+        }.f,
         .wireSend = struct {
             fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: [*]const u8, _: u32, _: i32) void {}
         }.f,
@@ -902,4 +976,45 @@ test "Node: prng" {
     try testing.expect(r1 != 0);
     try testing.expect(r2 != 0);
     // Note: they might be equal by chance, but unlikely
+}
+
+test "Node: network list" {
+    const callbacks = Callbacks{
+        .ctx = null,
+        .stateObjectGet = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]u8, _: u32) i32 {
+                return 0;
+            }
+        }.f,
+        .stateObjectPut = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}
+        }.f,
+        .stateObjectDelete = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64) void {}
+        }.f,
+        .wireSend = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: [*]const u8, _: u32, _: i32) void {}
+        }.f,
+        .frameInject = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u64, _: u32, _: u32, _: [*]const u8, _: u32) void {}
+        }.f,
+        .event = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: ?*const anyopaque) void {}
+        }.f,
+    };
+
+    const config = Config{};
+
+    var node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
+    defer node.deinit();
+
+    // Join two networks
+    _ = try node.joinNetwork(0x1111111111111111);
+    _ = try node.joinNetwork(0x2222222222222222);
+
+    // List should have both
+    const list = try node.listNetworks(testing.allocator);
+    defer testing.allocator.free(list);
+
+    try testing.expectEqual(@as(usize, 2), list.len);
 }
