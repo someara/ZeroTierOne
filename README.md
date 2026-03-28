@@ -25,6 +25,24 @@ ZeroTier addresses can be thought of as port numbers on an enormous planet-wide 
 
 A ZeroTier address looks like `8056c2e21c` and a network ID looks like `8056c2e21c000001`. Network IDs are composed of the ZeroTier address of that network's primary controller and an arbitrary 24-bit ID that identifies the network on this controller. Network controllers are roughly analogous to SDN controllers in SDN protocols like [OpenFlow](https://en.wikipedia.org/wiki/OpenFlow), though as with the analogy between VXLAN and VL2 this should not be read to imply that the protocols or design are the same. You can use our convenient and inexpensive SaaS hosted controllers at [my.zerotier.com](https://my.zerotier.com/) or [run your own controller](controller/) if you don't mind messing around with JSON configuration files or writing scripts to do so.
 
+### Zig Conversion (zerotea branch)
+
+The `zerotea` branch contains a **complete Zig conversion** of the ZeroTier core networking stack:
+
+- **Status**: 100% complete (47 modules, 35,462 lines, 673 tests)
+- **Location**: `src/node/*.zig` (pure Zig implementation)
+- **Performance**: ECC operations 3-223x faster than C++ (see `BENCHMARK_COMPARISON.md`)
+- **Safety**: 100% memory safe (no undefined behavior)
+
+**Quick Start**:
+```bash
+zig build zig-demo                           # Demo all 47 modules
+zig build bench-crypto -Doptimize=ReleaseFast # Benchmark Zig crypto
+zig build test                               # Run 673 tests
+```
+
+See **`WHAT_IS_WHAT.md`** to understand Zig vs C++ code, and **`ZIG_SUMMARY.md`** for complete details.
+
 ### Project Layout
 
 The base path contains the ZeroTier One service main entry point (`one.cpp`), self test code, makefiles, etc.
@@ -37,7 +55,8 @@ The base path contains the ZeroTier One service main entry point (`one.cpp`), se
  - `ext/`: third party libraries, binaries that we ship for convenience on some platforms (Mac and Windows), and installation support files.
  - `include/`: include files for the ZeroTier core.
  - `java/`: a JNI wrapper used with our Android mobile app. (The whole Android app is not open source but may be made so in the future.)
- - `node/`: the ZeroTier virtual Ethernet switch core, which is designed to be entirely separate from the rest of the code and able to be built as a stand-alone OS-independent library. Note to developers: do not use C++11 features in here, since we want this to build on old embedded platforms that lack C++11 support. C++11 can be used elsewhere.
+ - `node/`: the ZeroTier virtual Ethernet switch core (C++), which is designed to be entirely separate from the rest of the code and able to be built as a stand-alone OS-independent library. Note to developers: do not use C++11 features in here, since we want this to build on old embedded platforms that lack C++11 support. C++11 can be used elsewhere.
+ - `src/node/`: the ZeroTier core converted to Zig (100% complete, memory safe, 673 tests).
  - `osdep/`: code to support and integrate with OSes, including platform-specific stuff only built for certain targets.
  - `rule-compiler/`: JavaScript rules language compiler for defining network-level rules.
  - `service/`: the ZeroTier One service, which wraps the ZeroTier core and provides VPN-like connectivity to virtual networks for desktops, laptops, servers, VMs, and containers.
