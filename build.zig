@@ -4,160 +4,21 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const cpu_arch = target.result.cpu.arch;
-    const is_x86_64 = cpu_arch == .x86_64;
-
-    // ── Shared include paths (mirrors make-mac.mk / make-linux.mk) ──
-    const include_paths = [_][]const u8{
-        ".",
-        "ext",
-        "ext/prometheus-cpp-lite-1.0/core/include",
-        "ext/prometheus-cpp-lite-1.0/simpleapi/include",
-        "ext/opentelemetry-cpp-api-only/include",
-    };
-
-    // ── Base C++ compile flags ──────────────────────────────────────
-    const core_cpp_flags: []const []const u8 = if (is_x86_64)
-        &.{
-            "-std=c++17",
-            "-Wall",
-            "-DNDEBUG",
-            "-Wno-unused-private-field",
-            "-fstack-protector-strong",
-            "-DZT_USE_X64_ASM_SALSA2012",
-        }
-    else
-        &.{
-            "-std=c++17",
-            "-Wall",
-            "-DNDEBUG",
-            "-Wno-unused-private-field",
-            "-fstack-protector-strong",
-        };
-
     // ---------------------------------------------------------------
-    // libzerotiercore.a  (static library from existing C/C++ sources)
+    // NOTE: C++ build is handled by Makefile, not build.zig
     // ---------------------------------------------------------------
-    const core_mod = b.createModule(.{
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .link_libcpp = true,
-    });
-
-    for (include_paths) |dir| {
-        core_mod.addIncludePath(b.path(dir));
-    }
-
-    // Core C++ source files (matches CORE_OBJS in objects.mk)
-    core_mod.addCSourceFiles(.{
-        .files = &.{
-            "node/AES.cpp",
-            "node/AES_aesni.cpp",
-            "node/AES_armcrypto.cpp",
-            "node/ECC.cpp",
-            "node/Capability.cpp",
-            "node/CertificateOfMembership.cpp",
-            "node/CertificateOfOwnership.cpp",
-            "node/Identity.cpp",
-            "node/IncomingPacket.cpp",
-            "node/InetAddress.cpp",
-            "node/Membership.cpp",
-            "node/Metrics.cpp",
-            "node/Multicaster.cpp",
-            "node/Network.cpp",
-            "node/NetworkConfig.cpp",
-            "node/Node.cpp",
-            "node/OutboundMulticast.cpp",
-            "node/Packet.cpp",
-            "node/Path.cpp",
-            "node/Peer.cpp",
-            "node/Poly1305.cpp",
-            "node/Revocation.cpp",
-            "node/Salsa20.cpp",
-            "node/SelfAwareness.cpp",
-            "node/SHA512.cpp",
-            "node/Switch.cpp",
-            "node/Tag.cpp",
-            "node/Topology.cpp",
-            "node/Trace.cpp",
-            "node/Utils.cpp",
-            "node/Bond.cpp",
-            "node/PacketMultiplexer.cpp",
-            "osdep/OSUtils.cpp",
-        },
-        .flags = core_cpp_flags,
-    });
-
-    // x86_64 assembly: Salsa20/12 fast path
-    if (is_x86_64) {
-        core_mod.addAssemblyFile(b.path("ext/x64-salsa2012-asm/salsa2012.s"));
-    }
-
-    const core_lib = b.addLibrary(.{
-        .linkage = .static,
-        .name = "zerotiercore",
-        .root_module = core_mod,
-    });
-
-    b.installArtifact(core_lib);
-
+    // The C++/Rust ZeroTier daemon is built using `make` (unchanged from
+    // upstream). This build.zig file handles ONLY pure Zig code.
+    //
+    // C++ builds:
+    //   - make              # Build zerotier-one daemon
+    //   - make selftest     # Build C++ crypto benchmarks
+    //
+    // Zig builds (this file):
+    //   - zig build test        # Run 673 Zig module tests
+    //   - zig build selftest    # Run Zig crypto benchmarks
+    //   - zig build zig-demo    # Run Zig demonstration
     // ---------------------------------------------------------------
-    // selftest executable
-    // ---------------------------------------------------------------
-
-    const selftest_cpp_flags: []const []const u8 = if (is_x86_64)
-        &.{
-            "-std=c++17",
-            "-Wall",
-            "-DNDEBUG",
-            "-Wno-unused-private-field",
-            "-fstack-protector-strong",
-            "-DOMIT_JSON_SUPPORT",
-            "-DZT_USE_X64_ASM_SALSA2012",
-        }
-    else
-        &.{
-            "-std=c++17",
-            "-Wall",
-            "-DNDEBUG",
-            "-Wno-unused-private-field",
-            "-fstack-protector-strong",
-            "-DOMIT_JSON_SUPPORT",
-        };
-
-    const selftest_mod = b.createModule(.{
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .link_libcpp = true,
-    });
-
-    for (include_paths) |dir| {
-        selftest_mod.addIncludePath(b.path(dir));
-    }
-
-    // selftest.cpp only -- it uses node/* (via core lib), osdep/OSUtils
-    // (in core lib), and header-only osdep templates (Phy.hpp, Thread.hpp).
-    selftest_mod.addCSourceFiles(.{
-        .files = &.{"selftest.cpp"},
-        .flags = selftest_cpp_flags,
-    });
-
-    const selftest_exe = b.addExecutable(.{
-        .name = "zerotier-selftest",
-        .root_module = selftest_mod,
-    });
-
-    selftest_exe.linkLibrary(core_lib);
-
-    b.installArtifact(selftest_exe);
-
-    // `zig build selftest` -- build and run the selftest
-    const run_selftest = b.addRunArtifact(selftest_exe);
-    run_selftest.step.dependOn(b.getInstallStep());
-    const selftest_step = b.step("selftest", "Build and run the ZeroTier selftest");
-    selftest_step.dependOn(&run_selftest.step);
 
     // ---------------------------------------------------------------
     // Zig module tests  (`zig build test`)
@@ -268,4 +129,48 @@ pub fn build(b: *std.Build) void {
     run_demo.step.dependOn(b.getInstallStep());
     const demo_step = b.step("zig-demo", "Build and run the ZeroTier Zig demonstration");
     demo_step.dependOn(&run_demo.step);
+
+    // ---------------------------------------------------------------
+    // Simple benchmark comparison info
+    // ---------------------------------------------------------------
+    const bench_simple_mod = b.createModule(.{
+        .root_source_file = b.path("src/benchmark_simple.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const bench_simple_exe = b.addExecutable(.{
+        .name = "zerotier-benchmark-simple",
+        .root_module = bench_simple_mod,
+    });
+
+    b.installArtifact(bench_simple_exe);
+
+    const run_bench_simple = b.addRunArtifact(bench_simple_exe);
+    run_bench_simple.step.dependOn(b.getInstallStep());
+    const bench_simple_step = b.step("bench-info", "Show Zig vs C++ benchmark comparison info");
+    bench_simple_step.dependOn(&run_bench_simple.step);
+
+    // ---------------------------------------------------------------
+    // Zig selftest (`zig build selftest`)
+    // ---------------------------------------------------------------
+    // Pure Zig crypto performance benchmarks for direct comparison with C++
+    // Compare with C++ version: make selftest
+    const selftest_mod = b.createModule(.{
+        .root_source_file = b.path("src/benchmark_crypto.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const selftest_exe = b.addExecutable(.{
+        .name = "zerotier-selftest",
+        .root_module = selftest_mod,
+    });
+
+    b.installArtifact(selftest_exe);
+
+    const run_selftest = b.addRunArtifact(selftest_exe);
+    run_selftest.step.dependOn(b.getInstallStep());
+    const selftest_step = b.step("selftest", "Run Zig crypto benchmarks (pure Zig, compare with: make selftest)");
+    selftest_step.dependOn(&run_selftest.step);
 }
