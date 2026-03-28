@@ -2279,7 +2279,8 @@ pub const IncomingPacket = struct {
                 const from_mac = MAC.fromBytes(&from_bytes);
 
                 // Check for invalid source MAC.
-                if (!from_mac.isSet() or from_mac.eql(&cb.networkMac(cb.ctx, network))) {
+                const network_mac = cb.networkMac(cb.ctx, network);
+                if (!from_mac.isSet() or from_mac.eql(network_mac)) {
                     cb.peerReceived(
                         cb.ctx,
                         cb.tptr,
