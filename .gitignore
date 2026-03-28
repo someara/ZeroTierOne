@@ -146,3 +146,21 @@ snap/.snapcraft
 .zig-cache/
 zig-out/
 /tmp/
+# Test binaries
+test_*
+!test_*.zig
+!test_*.cpp
+!test_*.sh
+
+# Benchmark binaries
+benchmark_*
+!benchmark_*.zig
+
+# Service binaries
+zerotier_basic
+zerotier_minimal
+zerotier_one
+
+# Zig build output (already in .gitignore but being explicit)
+zig-cache/
+zig-out/
