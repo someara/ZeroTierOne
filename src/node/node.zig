@@ -635,8 +635,9 @@ pub const Node = struct {
     }
 
     /// Create Switch callbacks that route to Node methods.
-    fn createSwitchCallbacks(self: *Self) Switch.Callbacks {
-        return Switch.Callbacks{
+    fn createSwitchCallbacks(self: *Self) @import("switch.zig").Callbacks {
+        const SwitchCallbacks = @import("switch.zig").Callbacks;
+        return SwitchCallbacks{
             .ctx = @ptrCast(self),
 
             .lookupPeer = struct {
@@ -723,7 +724,7 @@ pub const Node = struct {
 
             .createPacket = struct {
                 fn f(dest: Address, src: Address, verb: u8) @import("packet.zig").Packet {
-                    const pkt = @import("packet.zig").Packet.init();
+                    const pkt = @import("packet.zig").Packet.initEmpty();
                     // TODO: Set destination, source, verb
                     _ = dest;
                     _ = src;

@@ -458,9 +458,9 @@ pub const Switch = struct {
         defer self.last_sent_whois_request_mutex.unlock();
 
         // Check if we've recently requested this address
-        if (self.last_sent_whois_request.get(addr)) |last_time| {
+        if (self.last_sent_whois_request.get(addr)) |last_time_ptr| {
             // Don't spam WHOIS requests
-            if (now - last_time < 1000) { // 1 second throttle
+            if (now - last_time_ptr.* < 1000) { // 1 second throttle
                 return;
             }
         }
@@ -495,7 +495,7 @@ pub const Switch = struct {
         for (&self.rx_queue) |*rq| {
             rq.lock.lock();
             if (rq.timestamp != 0 and rq.complete) {
-                if (rq.frag0.tryDecode(t_ptr, rq.flow_id, callbacks) or (now - rq.timestamp) > constants.receive_queue_timeout) {
+                if (rq.frag0.tryDecode(callbacks, rq.flow_id) or (now - rq.timestamp) > constants.receive_queue_timeout) {
                     rq.timestamp = 0;
                 }
             }
@@ -537,7 +537,7 @@ pub const Switch = struct {
         self.last_checked_queues = now;
 
         // Try to send queued packets
-        var need_whois = std.ArrayList(Address).init(self.allocator);
+        var need_whois = std.ArrayList(Address){ .items = &.{}, .capacity = 0 };
         defer need_whois.deinit(self.allocator);
 
         self.tx_queue_mutex.lock();
@@ -554,7 +554,7 @@ pub const Switch = struct {
                 continue;
             } else {
                 if (callbacks.lookupPeer(t_ptr, entry.dest) == null) {
-                    need_whois.append(entry.dest) catch {};
+                    need_whois.append(self.allocator, entry.dest) catch {};
                 }
             }
             i += 1;
@@ -570,7 +570,7 @@ pub const Switch = struct {
         for (&self.rx_queue) |*rq| {
             rq.lock.lock();
             if (rq.timestamp != 0 and rq.complete) {
-                if (rq.frag0.tryDecode(t_ptr, rq.flow_id, callbacks) or (now - rq.timestamp) > constants.receive_queue_timeout) {
+                if (rq.frag0.tryDecode(callbacks, rq.flow_id) or (now - rq.timestamp) > constants.receive_queue_timeout) {
                     rq.timestamp = 0;
                 } else {
                     const src = rq.frag0.source();

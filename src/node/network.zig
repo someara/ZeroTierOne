@@ -511,6 +511,14 @@ pub const Network = struct {
         return Address.init(self._id >> 24);
     }
 
+    /// Check if bridging is permitted for the given address
+    pub fn permitsBridging(self: *const Network, addr: Address) bool {
+        _ = self;
+        _ = addr;
+        // TODO: Implement bridging permission check
+        return false;
+    }
+
     /// Static: derive the controller address from a network ID.
     pub fn controllerFor(nwid: u64) Address {
         return Address.init(nwid >> 24);
