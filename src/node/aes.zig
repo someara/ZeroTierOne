@@ -319,6 +319,41 @@ pub const Ctr = struct {
         }
 
         // Process full 16-byte blocks.
+        // Try to process 4 blocks at a time for better performance
+        while (remaining.len >= 64) {
+            // Prepare 4 counter blocks
+            var c0 = self.ctr_block;
+            var c1 = self.ctr_block;
+            var c2 = self.ctr_block;
+            var c3 = self.ctr_block;
+
+            const counter_val = std.mem.readInt(u32, self.ctr_block[12..16], .big);
+            std.mem.writeInt(u32, c1[12..16], counter_val +% 1, .big);
+            std.mem.writeInt(u32, c2[12..16], counter_val +% 2, .big);
+            std.mem.writeInt(u32, c3[12..16], counter_val +% 3, .big);
+
+            // Encrypt counters
+            const k0 = self.aes.encrypt(&c0);
+            const k1 = self.aes.encrypt(&c1);
+            const k2 = self.aes.encrypt(&c2);
+            const k3 = self.aes.encrypt(&c3);
+
+            // XOR with input
+            for (0..16) |i| {
+                out[i] = remaining[i] ^ k0[i];
+                out[16 + i] = remaining[16 + i] ^ k1[i];
+                out[32 + i] = remaining[32 + i] ^ k2[i];
+                out[48 + i] = remaining[48 + i] ^ k3[i];
+            }
+
+            // Update counter, advance pointers
+            std.mem.writeInt(u32, self.ctr_block[12..16], counter_val +% 4, .big);
+            out += 64;
+            remaining = remaining[64..];
+            self.total_len += 64;
+        }
+
+        // Process remaining full blocks one at a time
         while (remaining.len >= 16) {
             const keystream = self.aes.encrypt(&self.ctr_block);
             self.incrementCounter();

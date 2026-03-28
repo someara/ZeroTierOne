@@ -156,10 +156,11 @@ pub fn build(b: *std.Build) void {
     // ---------------------------------------------------------------
     // Pure Zig crypto performance benchmarks for direct comparison with C++
     // Compare with C++ version: make selftest
+    // NOTE: Always use ReleaseFast for accurate performance measurements
     const selftest_mod = b.createModule(.{
         .root_source_file = b.path("src/benchmark_crypto.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = .ReleaseFast,
     });
 
     const selftest_exe = b.addExecutable(.{
