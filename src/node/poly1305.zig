@@ -1,14 +1,26 @@
 /// Poly1305 one-time message authentication code.
 ///
-/// Converted from `node/Poly1305.hpp` and `node/Poly1305.cpp`. Wraps
-/// Zig's standard library `std.crypto.onetimeauth.Poly1305` which
-/// implements the same DJB Poly1305-donna algorithm as the C++ code.
+/// Converted from `node/Poly1305.hpp` and `node/Poly1305.cpp`.
+///
+/// On ARM64, uses optimized NEON implementation for better performance.
+/// On other platforms, falls back to Zig's standard library implementation.
 ///
 /// Poly1305 takes a one-time-use 32-byte key and produces a 16-byte
 /// message authentication code. The key MUST NOT be reused for
 /// different messages. In ZeroTier's protocol, the first 32 bytes of
 /// the Salsa20/12 keystream serve as the one-time key.
 const std = @import("std");
+const builtin = @import("builtin");
+
+// Platform-specific optimized implementation
+const simd_arm = if (builtin.cpu.arch == .aarch64)
+    @import("poly1305_simd_arm.zig")
+else
+    struct {
+        pub fn compute(_: *[16]u8, _: []const u8, _: *const [32]u8) void {
+            @panic("ARM64 Poly1305 not available on this platform");
+        }
+    };
 
 // ── Public constants ───────────────────────────────────────────────
 
@@ -31,7 +43,12 @@ pub fn compute(
     data: []const u8,
     key: *const [key_len]u8,
 ) void {
-    Poly1305.create(auth, data, key);
+    // Use optimized implementation on ARM64 for buffers >= 64 bytes
+    if (builtin.cpu.arch == .aarch64 and data.len >= 64) {
+        simd_arm.compute(auth, data, key);
+    } else {
+        Poly1305.create(auth, data, key);
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
