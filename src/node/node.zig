@@ -24,7 +24,8 @@ const identity_mod = @import("identity.zig");
 const Identity = identity_mod.Identity;
 const InetAddress = @import("inet_address.zig").InetAddress;
 const MAC = @import("mac.zig").MAC;
-const Network = @import("network.zig").Network;
+const network_mod = @import("network.zig");
+const Network = network_mod.Network;
 const NetworkConfig = @import("network_config.zig").NetworkConfig;
 const Packet = @import("packet.zig").Packet;
 const Switch = @import("switch.zig").Switch;
@@ -321,10 +322,18 @@ pub const Node = struct {
 
             // TODO: Get roots to contact
             // TODO: Ping active peers
-            // TODO: Request network configs
-            // TODO: Check online status
 
-            // For now, just mark as online
+            // Request network configs for networks that need them
+            {
+                self.networks_mutex.lock();
+                defer self.networks_mutex.unlock();
+                var net_iter = self.networks.valueIterator();
+                while (net_iter.next()) |net_ptr| {
+                    net_ptr.*.requestConfiguration(t_ptr);
+                }
+            }
+
+            // Mark as online
             if (!self.online) {
                 self.online = true;
                 self.callbacks.event(self.callbacks.ctx, t_ptr, event_online, null);
@@ -381,7 +390,7 @@ pub const Node = struct {
             nwid,
             self.identity.address(),
             self.user_ptr,
-            .{}, // Network callbacks (TODO: wire up properly)
+            self.createNetworkCallbacks(),
         );
         try self.networks.put(nwid, network);
 
@@ -937,6 +946,71 @@ pub const Node = struct {
         };
     }
 
+    /// Create Network callbacks for config requests and network management.
+    fn createNetworkCallbacks(self: *Self) network_mod.Callbacks {
+        return network_mod.Callbacks{
+            .ctx = @ptrCast(self),
+
+            .now = struct {
+                fn f(ctx: ?*anyopaque) i64 {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return node.now;
+                }
+            }.f,
+
+            // configure_virtual_network_port left as null for now
+
+            .network_config_request_sent = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, nwid: u64, controller: Address) void {
+                    var ctrl_buf: [10]u8 = undefined;
+                    std.debug.print("  → Config request sent for network {x:0>16} to controller {s}\n", .{ nwid, controller.toString(&ctrl_buf) });
+                }
+            }.f,
+
+            .send_network_config_request = struct {
+                fn f(ctx: ?*anyopaque, t_ptr: ?*anyopaque, nwid: u64, controller: Address, metadata: []const u8, config_revision: u64, config_timestamp: u64) void {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    _ = t_ptr;
+
+                    // Build NETWORK_CONFIG_REQUEST packet
+                    var pkt = Packet.initNew(controller, node.identity.address(), .network_config_request);
+
+                    // Payload: network ID (8 bytes)
+                    const pkt_idx = @import("packet.zig").network_config_request_idx;
+                    pkt.buf.setAt(u64, pkt_idx.idx_network_id, @byteSwap(nwid)) catch return;
+
+                    // Payload: metadata dict length (2 bytes) + metadata
+                    const meta_len: u16 = @intCast(@min(metadata.len, 0xFFFF));
+                    pkt.buf.setAt(u16, pkt_idx.idx_dict_len, @byteSwap(meta_len)) catch return;
+
+                    if (meta_len > 0) {
+                        const dest = pkt.buf.fieldMut(pkt_idx.idx_dict, meta_len) catch return;
+                        @memcpy(dest[0..meta_len], metadata[0..meta_len]);
+                    }
+
+                    // Update packet size
+                    pkt.buf.setSize(pkt_idx.idx_dict + meta_len) catch return;
+
+                    // Include config revision/timestamp if we have existing config
+                    _ = config_revision;
+                    _ = config_timestamp;
+
+                    // Send via switch
+                    const switch_cbs = node.createSwitchCallbacks();
+                    node.switch_engine.send(null, &pkt, true, nwid, 0, &switch_cbs);
+                }
+            }.f,
+
+            .prng = struct {
+                fn f(ctx: ?*anyopaque) u64 {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    node.prng_state = node.prng_state *% 6364136223846793005 +% 1442695040888963407;
+                    return node.prng_state;
+                }
+            }.f,
+        };
+    }
+
     /// Create IncomingPacket callbacks for verb processing.
     ///
     /// This bridges between the Node context and IncomingPacket's requirements.
@@ -1317,8 +1391,14 @@ pub const Node = struct {
             }.f,
 
             .networkHandleConfigChunk = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: [*]const u8, _: u32, _: u32) void {
-                    // TODO: Handle network config chunk
+                fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, _: ?*anyopaque, packet_id: u64, nwid: u64, chunk_data: [*]const u8, chunk_len: u32, start_ptr: u32) void {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    _ = tptr;
+                    const network = node.getNetwork(nwid) orelse return;
+                    const data = chunk_data[0..chunk_len];
+                    // Extract controller address from network ID (upper 40 bits)
+                    const controller_addr = Address.init(nwid >> 24);
+                    _ = network.handleConfigChunk(null, packet_id, controller_addr, data, start_ptr);
                 }
             }.f,
 
