@@ -354,10 +354,10 @@ pub const Node = struct {
             // (Topology, SelfAwareness, Multicaster would be called here when implemented)
         }
 
-        // Switch timer tasks
+        // Switch timer tasks (pass self as t_ptr since switch callbacks expect it)
         const switch_callbacks = self.createSwitchCallbacks();
         const switch_deadline = self.switch_engine.doTimerTasks(
-            t_ptr,
+            @ptrCast(self),
             now,
             &switch_callbacks,
         );
@@ -665,8 +665,10 @@ pub const Node = struct {
             .ctx = @ptrCast(self),
 
             .lookupPeer = struct {
-                fn f(ctx: ?*anyopaque, addr: Address) ?*anyopaque {
-                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                fn f(ctx_or_tptr: ?*anyopaque, addr: Address) ?*anyopaque {
+                    // Switch may pass t_ptr or ctx — handle both
+                    const ptr = ctx_or_tptr orelse return null;
+                    const node: *Self = @ptrCast(@alignCast(ptr));
                     return @ptrCast(node.topology.getPeer(addr));
                 }
             }.f,
@@ -892,9 +894,8 @@ pub const Node = struct {
             }.f,
 
             .sendWhoisRequest = struct {
-                fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, pkt: *const Packet, now: i64) bool {
+                fn f(ctx: ?*anyopaque, _: ?*anyopaque, pkt: *const Packet, _: i64) bool {
                     const node: *Self = @ptrCast(@alignCast(ctx.?));
-                    _ = tptr;
 
                     const TopologyMod = @import("topology.zig");
 
@@ -925,25 +926,29 @@ pub const Node = struct {
                         }
                         node.topology._peers_m.unlock();
 
-                        // If we have a peer for this upstream, send via that peer
+                        // If we have a peer for this upstream, send via ALL paths
                         if (found_peer) |peer| {
-                            const peer_path = peer.getAppropriatePath(now, true); // include_expired=true for roots
-                            if (peer_path) |path| {
-                                var ip_buf: [64]u8 = undefined;
-                                std.debug.print("  [WHOIS] Sending via path {s}\n", .{path.address().toString(&ip_buf)});
-                                const pkt_data = pkt.buf.data();
-                                node.callbacks.wireSend(
-                                    node.callbacks.ctx,
-                                    null,
-                                    path.localSocket(),
-                                    path.address(),
-                                    pkt_data.ptr,
-                                    @intCast(pkt_data.len),
-                                    64,
-                                );
-                                sent = true;
-                            } else {
-                                std.debug.print("  [WHOIS] Peer found but no path!\n", .{});
+                            const PeerMod = @import("peer.zig");
+                            var path_buf: [PeerMod.max_peer_network_paths]?*@import("path.zig").Path = undefined;
+                            const path_count = peer.getAllPaths(&path_buf);
+                            if (path_count == 0) {
+                                std.debug.print("  [WHOIS] Peer found but no paths!\n", .{});
+                            }
+                            var pi: u32 = 0;
+                            while (pi < path_count) : (pi += 1) {
+                                if (path_buf[pi]) |path| {
+                                    const pkt_data = pkt.buf.data();
+                                    node.callbacks.wireSend(
+                                        node.callbacks.ctx,
+                                        null,
+                                        path.localSocket(),
+                                        path.address(),
+                                        pkt_data.ptr,
+                                        @intCast(pkt_data.len),
+                                        64,
+                                    );
+                                    sent = true;
+                                }
                             }
                         } else {
                             std.debug.print("  [WHOIS] No peer found for upstream\n", .{});

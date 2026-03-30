@@ -64,6 +64,9 @@ pub fn main() !void {
     var service = try Service.init(allocator, port, home_dir);
     defer service.deinit();
 
+    // Fix callback pointers (init returns by value, so ctx must be set after)
+    service.setup();
+
     // Bind sockets
     try service.bindSockets();
 

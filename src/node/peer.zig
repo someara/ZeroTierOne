@@ -170,6 +170,10 @@ pub const PeerPath = struct {
             .priority = 1,
         };
     }
+
+    pub fn isActive(self: *const PeerPath) bool {
+        return self.p != null;
+    }
 };
 
 // ── Peer ──────────────────────────────────────────────────────────
@@ -487,7 +491,7 @@ pub const Peer = struct {
                         defer self._paths_m.unlock();
 
                         var oldest_path_idx: u32 = max_peer_network_paths;
-                        var oldest_path_age: u32 = 0;
+                        var oldest_path_age: i64 = 0;
                         var replace_path: u32 = max_peer_network_paths;
 
                         for (&self._paths, 0..) |*pp, i| {

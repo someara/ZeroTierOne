@@ -1170,18 +1170,19 @@ pub const Topology = struct {
             }
         }
 
-        // Add stable endpoints as paths
+        // Add stable endpoints as paths (must use topology's path table for stable pointers)
         if (existing_peer) |peer| {
             if (endpoints) |eps| {
                 const now = std.time.milliTimestamp();
                 var i: u32 = 0;
                 while (i < endpoint_count and i < eps.len) : (i += 1) {
                     if (eps[i].port() != 0) {
-                        var path = Path.init();
-                        path._addr = eps[i];
-                        path._local_socket = -1;
-                        path._last_in = now; // Mark as recently seen so it's not expired
-                        _ = peer.addPath(&path, now);
+                        // Use topology's path table for stable pointer
+                        const stable_path = self.getPath(-1, &eps[i]);
+                        if (stable_path) |p| {
+                            p._last_in = now;
+                            _ = peer.addPath(p, now);
+                        }
                     }
                 }
             }

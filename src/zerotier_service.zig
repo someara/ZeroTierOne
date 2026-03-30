@@ -107,7 +107,7 @@ pub const Service = struct {
 
         std.debug.print("  ✓ Node initialized with address: {any}\n", .{node.identity.address()});
 
-        var service = Service{
+        const service = Service{
             .allocator = allocator,
             .node = node,
             .phy = phy,
@@ -122,13 +122,15 @@ pub const Service = struct {
             .terminate = false,
         };
 
-        // Update Node callbacks to point to service
-        service.node.callbacks.ctx = &service;
-
-        // Load planet world (root servers)
-        service.loadPlanet();
-
+        // NOTE: callbacks.ctx must be set by caller after init returns,
+        // since the Service is returned by value (stack copy).
         return service;
+    }
+
+    /// Must be called after init to fix callback pointers (init returns by value).
+    pub fn setup(self: *Service) void {
+        self.node.callbacks.ctx = self;
+        self.loadPlanet();
     }
 
     /// Clean up and shut down
@@ -313,14 +315,20 @@ pub const Service = struct {
     /// Bind UDP sockets for ZeroTier protocol
     pub fn bindSockets(self: *Service) !void {
         // Bind primary port (IPv4)
-        const bind_addr_v4 = net.Address.initIp4([4]u8{0, 0, 0, 0}, self.primary_port);
+        const bind_addr_v4 = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, self.primary_port);
         std.debug.print("Binding UDP socket to 0.0.0.0:{d}...\n", .{self.primary_port});
 
         self.primary_sock = try self.phy.udpBind(bind_addr_v4, self, 0);
-        std.debug.print("  ✓ Primary socket bound\n", .{});
+        std.debug.print("  ✓ IPv4 socket bound\n", .{});
 
-        // TODO: Bind IPv6 socket
-        // TODO: Bind secondary ports
+        // Bind IPv6 socket
+        const bind_addr_v6 = net.Address.initIp6([16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, self.primary_port, 0, 0);
+        if (self.phy.udpBind(bind_addr_v6, self, 0)) |v6_sock| {
+            self.secondary_socks.append(self.allocator, v6_sock) catch {};
+            std.debug.print("  ✓ IPv6 socket bound\n", .{});
+        } else |_| {
+            std.debug.print("  ⚠ IPv6 socket bind failed (continuing with IPv4 only)\n", .{});
+        }
     }
 
     /// Create and configure TUN device for a network
@@ -635,11 +643,21 @@ fn nodeWireSend(
         }
     }
 
-    // Send via Phy
-    if (service.primary_sock) |sock| {
-        const sent = service.phy.udpSend(sock, dest_addr, data[0..len]);
+    // Pick the right socket (IPv4 vs IPv6)
+    const sock = if (remote_addr.isV4())
+        service.primary_sock
+    else blk: {
+        // Use first secondary (IPv6) socket if available, else try primary
+        if (service.secondary_socks.items.len > 0) {
+            break :blk service.secondary_socks.items[0];
+        }
+        break :blk service.primary_sock;
+    };
+
+    if (sock) |s| {
+        const sent = service.phy.udpSend(s, dest_addr, data[0..len]);
         if (sent) {
-            std.debug.print("← Sent {d} bytes to port {d}\n", .{len, remote_addr.port()});
+            // Quiet success (only log occasionally to reduce noise)
         } else {
             std.debug.print("  ✗ Failed to send {d} bytes\n", .{len});
         }
