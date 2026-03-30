@@ -20,6 +20,8 @@ const PhySocket = @import("node/phy.zig").PhySocket;
 const PhyHandler = @import("node/phy.zig").PhyHandler;
 const InetAddress = @import("node/inet_address.zig").InetAddress;
 const Packet = @import("node/packet.zig").Packet;
+const TunDevice = @import("node/tun_device.zig").TunDevice;
+const HttpApi = @import("node/http_api.zig").HttpApi;
 
 /// Service context - holds all state for the running service
 pub const Service = struct {
@@ -33,6 +35,13 @@ pub const Service = struct {
 
     // Secondary UDP sockets (for multiple ports)
     secondary_socks: std.ArrayList(*PhySocket),
+
+    // TUN device for virtual network interface
+    tun: ?TunDevice,
+
+    // HTTP API server
+    http_api: ?*HttpApi,
+    auth_token: ?[]const u8,
 
     // Control flags
     running: bool,
@@ -88,6 +97,9 @@ pub const Service = struct {
             .primary_port = primary_port,
             .primary_sock = null,
             .secondary_socks = std.ArrayList(*PhySocket){ .items = &.{}, .capacity = 0 },
+            .tun = null,
+            .http_api = null,
+            .auth_token = null,
             .running = false,
             .terminate = false,
         };
@@ -101,10 +113,69 @@ pub const Service = struct {
     /// Clean up and shut down
     pub fn deinit(self: *Service) void {
         std.debug.print("Shutting down service...\n", .{});
+        if (self.http_api) |api| api.stop();
+        if (self.tun) |*tun| tun.close();
         self.secondary_socks.deinit(self.allocator);
         self.node.deinit();
         self.phy.deinit();
+        if (self.auth_token) |t| self.allocator.free(t);
         std.debug.print("  ✓ Service shutdown complete\n", .{});
+    }
+
+    /// Start the HTTP API server on the given port
+    pub fn startHttpApi(self: *Service, port: u16, home_dir: ?[]const u8) !void {
+        // Generate or read auth token
+        const token = try self.loadOrGenerateAuthToken(home_dir);
+        self.auth_token = token;
+
+        std.debug.print("Starting HTTP API on 127.0.0.1:{d}...\n", .{port});
+        self.http_api = try HttpApi.start(self.allocator, &self.node, port, token);
+        std.debug.print("  ✓ HTTP API server running\n", .{});
+    }
+
+    fn loadOrGenerateAuthToken(self: *Service, home_dir: ?[]const u8) ![]const u8 {
+        // Try to read existing token
+        if (home_dir) |dir| {
+            var path_buf: [256]u8 = undefined;
+            const path = std.fmt.bufPrint(&path_buf, "{s}/authtoken.secret", .{dir}) catch return self.generateAuthToken(home_dir);
+            const file = std.fs.openFileAbsolute(path, .{}) catch return self.generateAuthToken(home_dir);
+            defer file.close();
+            const content = file.readToEndAlloc(self.allocator, 1024) catch return self.generateAuthToken(home_dir);
+            const trimmed = std.mem.trim(u8, content, &std.ascii.whitespace);
+            if (trimmed.len > 0) {
+                const token = try self.allocator.dupe(u8, trimmed);
+                self.allocator.free(content);
+                return token;
+            }
+            self.allocator.free(content);
+        }
+        return self.generateAuthToken(home_dir);
+    }
+
+    fn generateAuthToken(self: *Service, home_dir: ?[]const u8) ![]const u8 {
+        // Generate 24-char random token
+        var rand_bytes: [24]u8 = undefined;
+        std.crypto.random.bytes(&rand_bytes);
+
+        const charset = "abcdefghijklmnopqrstuvwxyz0123456789";
+        var token: [24]u8 = undefined;
+        for (&token, 0..) |*c, i| {
+            c.* = charset[rand_bytes[i] % charset.len];
+        }
+
+        const result = try self.allocator.dupe(u8, &token);
+
+        // Write to file if we have a home dir
+        if (home_dir) |dir| {
+            var path_buf: [256]u8 = undefined;
+            const path = std.fmt.bufPrint(&path_buf, "{s}/authtoken.secret", .{dir}) catch return result;
+            const file = std.fs.createFileAbsolute(path, .{}) catch return result;
+            defer file.close();
+            file.writeAll(result) catch {};
+            std.debug.print("  ✓ Auth token written to {s}\n", .{path});
+        }
+
+        return result;
     }
 
     /// Bind UDP sockets for ZeroTier protocol
@@ -118,6 +189,31 @@ pub const Service = struct {
 
         // TODO: Bind IPv6 socket
         // TODO: Bind secondary ports
+    }
+
+    /// Create and configure TUN device for a network
+    pub fn createTunDevice(self: *Service) !void {
+        std.debug.print("Creating TUN device...\n", .{});
+
+        var tun = try TunDevice.open(self.allocator, "utun");
+        errdefer tun.close();
+
+        self.tun = tun;
+        std.debug.print("  ✓ TUN device ready: {s}\n", .{tun.name});
+
+        // Configure with a test IP address
+        // In production, this would come from network configuration
+        const test_ip = [4]u8{10, 147, 20, 1};
+        const test_netmask = [4]u8{255, 255, 255, 0};
+
+        std.debug.print("Configuring IP address...\n", .{});
+        tun.setAddress(test_ip, test_netmask) catch |err| {
+            std.debug.print("  ⚠ Failed to set IP address: {}\n", .{err});
+            std.debug.print("  ⚠ You may need to run: sudo ifconfig {s} 10.147.20.1 netmask 255.255.255.0 up\n", .{tun.name});
+            // Continue anyway - device is still usable
+        };
+
+        std.debug.print("  ✓ TUN device configured\n", .{});
     }
 
     /// Main event loop
@@ -147,6 +243,77 @@ pub const Service = struct {
                 // Print status every 10 seconds
                 if (tick_count % 20 == 0) {
                     std.debug.print("[{d}s] Service running...\n", .{tick_count / 2});
+                }
+            }
+
+            // Read from TUN device if available
+            if (self.tun) |*tun| {
+                var tun_buffer: [2800]u8 = undefined;
+                const tun_len = tun.read(&tun_buffer) catch |err| blk: {
+                    if (err != error.WouldBlock) {
+                        std.debug.print("  ✗ TUN read error: {}\n", .{err});
+                    }
+                    break :blk 0;
+                };
+
+                if (tun_len > 0) {
+                    std.debug.print("  ← Read {d} bytes from TUN device\n", .{tun_len});
+
+                    // Parse IP packet to extract addresses and type
+                    if (tun_len >= 20) { // Minimum IPv4 header
+                        const ip_version = tun_buffer[0] >> 4;
+
+                        if (ip_version == 4) {
+                            // IPv4 packet - look up which network this TUN device belongs to
+                            const network_list = self.node.listNetworks(self.allocator) catch {
+                                std.debug.print("  ✗ Failed to get network list\n", .{});
+                                continue;
+                            };
+                            defer self.allocator.free(network_list);
+
+                            if (network_list.len == 0) {
+                                std.debug.print("  ✗ No networks joined - cannot route TUN traffic\n", .{});
+                                continue;
+                            }
+
+                            // Use the first network (in production, you'd map TUN device to network)
+                            const nwid = network_list[0];
+                            const network = self.node.getNetwork(nwid);
+
+                            if (network == null) {
+                                std.debug.print("  ✗ Network {x} not found\n", .{nwid});
+                                continue;
+                            }
+
+                            // Get real network ID and MAC address
+                            const real_nwid = network.?.id();
+                            const my_mac = network.?.mac();
+                            const src_mac: u64 = my_mac.toInt();
+                            const dst_mac: u64 = 0xffffffffffff; // Broadcast (real routing would use ARP/NDP)
+                            const ether_type: u32 = 0x0800; // IPv4
+                            const vlan_id: u32 = 0;
+
+                            std.debug.print("  → Routing via network {x} (MAC: {x:0>12})\n", .{real_nwid, src_mac});
+
+                            // Process the frame with real network ID
+                            self.node.processVirtualNetworkFrame(
+                                null,
+                                now,
+                                real_nwid,
+                                src_mac,
+                                dst_mac,
+                                ether_type,
+                                vlan_id,
+                                @ptrCast(&tun_buffer),
+                                @intCast(tun_len),
+                            ) catch |err| {
+                                std.debug.print("  ✗ Failed to process frame: {}\n", .{err});
+                            };
+                        } else if (ip_version == 6) {
+                            // IPv6 packet
+                            std.debug.print("  → IPv6 packet (not yet supported)\n", .{});
+                        }
+                    }
                 }
             }
 
@@ -319,7 +486,7 @@ fn nodeWireSend(
 
 /// Node callback: Inject frame into virtual network interface
 fn nodeFrameInject(
-    _: ?*anyopaque,
+    ctx: ?*anyopaque,
     _: ?*anyopaque,
     nwid: u64,
     source_mac: u64,
@@ -329,14 +496,25 @@ fn nodeFrameInject(
     data: [*]const u8,
     len: u32,
 ) void {
-    // TODO: Inject into TUN/TAP device
-    // For now, just log
-    std.debug.print("  → Frame inject: nwid={x:0>16}, len={d}\n", .{nwid, len});
+    const service: *Service = @ptrCast(@alignCast(ctx.?));
+
+    _ = nwid;
     _ = source_mac;
     _ = dest_mac;
     _ = ether_type;
     _ = vlan_id;
-    _ = data;
+
+    // Write packet to TUN device
+    if (service.tun) |*tun| {
+        const packet = data[0..len];
+        tun.write(packet) catch |err| {
+            std.debug.print("  ✗ TUN write failed: {}\n", .{err});
+            return;
+        };
+        std.debug.print("  → Injected {d} bytes to TUN device\n", .{len});
+    } else {
+        std.debug.print("  ⚠ No TUN device - dropping frame ({d} bytes)\n", .{len});
+    }
 }
 
 /// Node callback: Event notification (UP, ONLINE, OFFLINE, etc.)

@@ -152,6 +152,32 @@ pub fn build(b: *std.Build) void {
     bench_simple_step.dependOn(&run_bench_simple.step);
 
     // ---------------------------------------------------------------
+    // ZeroTier Service (`zig build service`)
+    // ---------------------------------------------------------------
+    // The main ZeroTier daemon/service with UDP/TUN support
+    const service_mod = b.createModule(.{
+        .root_source_file = b.path("src/zerotier_one.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    service_mod.addIncludePath(b.path("."));
+
+    const service_exe = b.addExecutable(.{
+        .name = "zerotier-one",
+        .root_module = service_mod,
+    });
+
+    b.installArtifact(service_exe);
+
+    const run_service = b.addRunArtifact(service_exe);
+    if (b.args) |args| {
+        run_service.addArgs(args);
+    }
+    run_service.step.dependOn(b.getInstallStep());
+    const service_step = b.step("service", "Build and run ZeroTier service (use: zig build service -- -p 9995)");
+    service_step.dependOn(&run_service.step);
+
+    // ---------------------------------------------------------------
     // Zig selftest (`zig build selftest`)
     // ---------------------------------------------------------------
     // Pure Zig crypto performance benchmarks for direct comparison with C++
@@ -174,4 +200,81 @@ pub fn build(b: *std.Build) void {
     run_selftest.step.dependOn(b.getInstallStep());
     const selftest_step = b.step("selftest", "Run Zig crypto benchmarks (pure Zig, compare with: make selftest)");
     selftest_step.dependOn(&run_selftest.step);
+
+    // ---------------------------------------------------------------
+    // HTTP Client Test (`zig build test-http-client`)
+    // ---------------------------------------------------------------
+    // Test HTTP client against running zerotier-one service
+    // Prerequisites: make && sudo ./zerotier-one
+    const http_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_http_client.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const http_test_exe = b.addExecutable(.{
+        .name = "test-http-client",
+        .root_module = http_test_mod,
+    });
+
+    b.installArtifact(http_test_exe);
+
+    const run_http_test = b.addRunArtifact(http_test_exe);
+    run_http_test.step.dependOn(b.getInstallStep());
+    const http_test_step = b.step("test-http-client", "Test HTTP client (requires: make && sudo ./zerotier-one)");
+    http_test_step.dependOn(&run_http_test.step);
+
+    // ---------------------------------------------------------------
+    // macOS Tray App (`zig build tray`)
+    // ---------------------------------------------------------------
+    // Native macOS menu bar application for ZeroTier
+    // Uses Cocoa/AppKit via Objective-C FFI
+    const tray_mod = b.createModule(.{
+        .root_source_file = b.path("src/zerotier_tray.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const tray_exe = b.addExecutable(.{
+        .name = "ZeroTierTray",
+        .root_module = tray_mod,
+    });
+
+    // Link against macOS frameworks
+    tray_exe.linkFramework("Cocoa");
+    tray_exe.linkFramework("Foundation");
+    tray_exe.linkLibC();
+
+    // Compile Objective-C bridge files
+    tray_exe.addCSourceFile(.{
+        .file = b.path("src/macos/menu_bridge_blocks.m"),
+        .flags = &.{"-fno-objc-arc"},
+    });
+    tray_exe.addCSourceFile(.{
+        .file = b.path("src/macos/clipboard.m"),
+        .flags = &.{"-fno-objc-arc"},
+    });
+
+    b.installArtifact(tray_exe);
+
+    const run_tray = b.addRunArtifact(tray_exe);
+    run_tray.step.dependOn(b.getInstallStep());
+    const tray_step = b.step("tray", "Build and run macOS tray app (requires: zerotier-one service)");
+    tray_step.dependOn(&run_tray.step);
+
+    // ---------------------------------------------------------------
+    // Tray App Logic Tests (`zig build test-tray`)
+    // ---------------------------------------------------------------
+    // Unit tests for tray business logic (no GUI, no service needed)
+    const tray_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_tray_logic.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const tray_test = b.addTest(.{
+        .root_module = tray_test_mod,
+    });
+    const run_tray_test = b.addRunArtifact(tray_test);
+    const tray_test_step = b.step("test-tray", "Test tray app logic (no GUI or service needed)");
+    tray_test_step.dependOn(&run_tray_test.step);
 }

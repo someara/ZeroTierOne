@@ -26,7 +26,9 @@ const InetAddress = @import("inet_address.zig").InetAddress;
 const MAC = @import("mac.zig").MAC;
 const Network = @import("network.zig").Network;
 const NetworkConfig = @import("network_config.zig").NetworkConfig;
+const Packet = @import("packet.zig").Packet;
 const Switch = @import("switch.zig").Switch;
+const Topology = @import("topology.zig").Topology;
 const Mutex = @import("mutex.zig");
 const Hashtable = @import("hashtable.zig").Hashtable;
 const constants = @import("constants.zig");
@@ -65,7 +67,7 @@ pub const Node = struct {
 
     // Subsystems (owned)
     switch_engine: *Switch,
-    // topology: *Topology,
+    topology: *Topology,
     // multicaster: *Multicaster,
     // self_awareness: *SelfAwareness,
     // bond: *Bond,
@@ -115,8 +117,13 @@ pub const Node = struct {
 
         switch_engine.* = try Switch.init(allocator);
 
+        // Initialize Topology
+        const topology = try allocator.create(Topology);
+        errdefer allocator.destroy(topology);
+
+        Topology.create(topology, &identity);
+
         // TODO: Initialize other subsystems
-        // - Topology
         // - Multicaster
         // - SelfAwareness
         // - Bond
@@ -126,6 +133,7 @@ pub const Node = struct {
             .allocator = allocator,
             .identity = identity,
             .switch_engine = switch_engine,
+            .topology = topology,
             .networks = std.AutoHashMap(u64, *Network).init(allocator),
             .networks_mutex = .{},
             .now = now,
@@ -226,6 +234,9 @@ pub const Node = struct {
         // Clean up subsystems
         self.switch_engine.deinit();
         self.allocator.destroy(self.switch_engine);
+
+        // Note: Topology doesn't have a deinit method, just free the memory
+        self.allocator.destroy(self.topology);
     }
 
     /// Process a packet received from the network.
@@ -269,24 +280,21 @@ pub const Node = struct {
         self.now = now;
 
         const network = self.getNetwork(nwid) orelse return error.NetworkNotFound;
-        _ = network;
 
-        // Call switch to inject frame
-        // Validate ether_type and vlan_id fit in u16
-        const et = std.math.cast(u16, ether_type) orelse return error.InvalidEtherType;
-        const vlan = std.math.cast(u16, vlan_id) orelse return error.InvalidVlanId;
+        // Convert u64 MAC addresses to MAC structs
+        const from_mac = MAC.init(source_mac);
+        const to_mac = MAC.init(dest_mac);
 
         const callbacks = self.createSwitchCallbacks();
         self.switch_engine.onLocalEthernet(
             t_ptr,
-            nwid,
-            source_mac,
-            dest_mac,
-            et,
-            vlan,
+            @ptrCast(network),
+            &from_mac,
+            &to_mac,
+            ether_type,
+            vlan_id,
             data,
             len,
-            now,
             &callbacks,
         );
     }
@@ -368,7 +376,13 @@ pub const Node = struct {
         const network = try self.allocator.create(Network);
         errdefer self.allocator.destroy(network);
 
-        network.* = try Network.init(self.allocator, nwid);
+        network.* = Network.init(
+            self.allocator,
+            nwid,
+            self.identity.address(),
+            self.user_ptr,
+            .{}, // Network callbacks (TODO: wire up properly)
+        );
         try self.networks.put(nwid, network);
 
         return network;
@@ -388,7 +402,7 @@ pub const Node = struct {
 
             // Return user pointer if requested
             if (user_ptr_out) |out| {
-                out.* = network.userPtr();
+                out.* = network._u_ptr;
             }
 
             // Notify application
@@ -426,6 +440,7 @@ pub const Node = struct {
     }
 
     /// List all networks.
+    /// Caller owns returned slice and must free with allocator.free().
     pub fn listNetworks(self: *Self, allocator: mem.Allocator) ![]u64 {
         self.networks_mutex.lock();
         defer self.networks_mutex.unlock();
@@ -641,22 +656,59 @@ pub const Node = struct {
             .ctx = @ptrCast(self),
 
             .lookupPeer = struct {
-                fn f(_: ?*anyopaque, _: Address) ?*anyopaque {
-                    // TODO: Call topology.getPeer
-                    return null;
+                fn f(ctx: ?*anyopaque, addr: Address) ?*anyopaque {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return @ptrCast(node.topology.getPeer(addr));
                 }
             }.f,
 
             .sendViaPeer = struct {
-                fn f(_: ?*anyopaque, _: *anyopaque, _: *const @import("packet.zig").Packet, _: bool, _: i64, _: i32) void {
-                    // TODO: Implement peer send
+                fn f(ctx: ?*anyopaque, peer_ptr: *anyopaque, packet: *const @import("packet.zig").Packet, encrypt: bool, now: i64, flow_id: i32) void {
+                    _ = flow_id;
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    const Peer = @import("peer.zig").Peer;
+                    const peer: *Peer = @ptrCast(@alignCast(peer_ptr));
+
+                    // Get the best path to send to this peer
+                    const path = peer.getAppropriatePath(now, false);
+                    if (path == null) {
+                        // No path available - drop packet
+                        return;
+                    }
+
+                    // Make a mutable copy of the packet for encryption
+                    var pkt = packet.*;
+
+                    // Encrypt if requested
+                    if (encrypt) {
+                        const peer_key = peer.key();
+                        const peer_aes = peer.aesKeysIfSupported();
+                        const peer_pub = peer.identity().publicKey();
+                        pkt.armor(peer_key[0..32], true, false, peer_aes, peer_pub);
+                    }
+
+                    // Send via the path
+                    const pkt_data = pkt.buf.data();
+                    node.callbacks.wireSend(
+                        node.callbacks.ctx,
+                        null, // t_ptr
+                        path.?.localSocket(),
+                        path.?.address(),
+                        pkt_data.ptr,
+                        @intCast(pkt_data.len),
+                        64, // ttl
+                    );
+
+                    // Mark path as sent
+                    path.?.sent(now);
                 }
             }.f,
 
             .peerAddress = struct {
-                fn f(_: *anyopaque) Address {
-                    // TODO: Get peer address
-                    return Address.init(0);
+                fn f(peer_ptr: *anyopaque) Address {
+                    const PeerType = @import("peer.zig").Peer;
+                    const peer: *PeerType = @ptrCast(@alignCast(peer_ptr));
+                    return peer.address();
                 }
             }.f,
 
@@ -798,8 +850,21 @@ pub const Node = struct {
             }.f,
 
             .pathReceived = struct {
-                fn f(_: ?*anyopaque, _: i64, _: *const InetAddress, _: i64) void {
-                    // TODO: Update path timestamp via topology
+                fn f(ctx: ?*anyopaque, local_socket: i64, from_addr: *const InetAddress, now: i64) void {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    // Get or create path and update timestamp
+                    if (node.topology.getPath(local_socket, from_addr)) |path| {
+                        const Path = @import("path.zig").Path;
+                        const p: *Path = @ptrCast(@alignCast(path));
+                        p.received(now);
+                    }
+                }
+            }.f,
+
+            .getPath = struct {
+                fn f(ctx: ?*anyopaque, local_socket: i64, from_addr: *const InetAddress) ?*anyopaque {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return @ptrCast(node.topology.getPath(local_socket, from_addr));
                 }
             }.f,
 
@@ -807,6 +872,595 @@ pub const Node = struct {
                 fn f(ctx: ?*anyopaque) i64 {
                     const node: *Self = @ptrCast(@alignCast(ctx.?));
                     return node.now;
+                }
+            }.f,
+
+            .createIncomingPacketCallbacks = struct {
+                fn f(ctx: ?*anyopaque, tptr: ?*anyopaque) @import("incoming_packet.zig").Callbacks {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return node.createIncomingPacketCallbacks(tptr);
+                }
+            }.f,
+
+            .sendWhoisRequest = struct {
+                fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, pkt: *const Packet, now: i64) bool {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    _ = tptr;
+
+                    const TopologyMod = @import("topology.zig");
+
+                    // Send WHOIS to root servers (upstream addresses from planet/moon)
+                    var sent = false;
+                    node.topology._upstreams_m.lock();
+                    defer node.topology._upstreams_m.unlock();
+
+                    // Send to all upstream addresses (root servers)
+                    var i: usize = 0;
+                    while (i < node.topology._upstream_count) : (i += 1) {
+                        const upstream_addr = node.topology._upstream_addresses[i];
+
+                        // Try to find a peer for this upstream address
+                        node.topology._peers_m.lock();
+                        var found_peer: ?*@import("peer.zig").Peer = null;
+                        var j: usize = 0;
+                        while (j < TopologyMod.max_peers) : (j += 1) {
+                            const entry = &node.topology._peers[j];
+                            if (entry.in_use and entry.addr.eql(upstream_addr)) {
+                                found_peer = &entry.peer;
+                                break;
+                            }
+                        }
+                        node.topology._peers_m.unlock();
+
+                        // If we have a peer for this upstream, send via that peer
+                        if (found_peer) |peer| {
+                            const peer_path = peer.getAppropriatePath(now, false);
+                            if (peer_path) |path| {
+                                const pkt_data = pkt.buf.data();
+                                node.callbacks.wireSend(
+                                    node.callbacks.ctx,
+                                    null,
+                                    path.localSocket(),
+                                    path.address(),
+                                    pkt_data.ptr,
+                                    @intCast(pkt_data.len),
+                                    64,
+                                );
+                                sent = true;
+                            }
+                        }
+                    }
+
+                    return sent;
+                }
+            }.f,
+        };
+    }
+
+    /// Create IncomingPacket callbacks for verb processing.
+    ///
+    /// This bridges between the Node context and IncomingPacket's requirements.
+    /// Most callbacks are stubbed for now - they'll be implemented as we add
+    /// Topology, Peer, and Path management.
+    fn createIncomingPacketCallbacks(self: *Self, t_ptr: ?*anyopaque) @import("incoming_packet.zig").Callbacks {
+        const IncomingPacketCallbacks = @import("incoming_packet.zig").Callbacks;
+        const IncomingAes = @import("aes.zig").Aes;
+        const IncomingEcc = @import("ecc.zig");
+        const MulticastGroup = @import("multicast_group.zig").MulticastGroup;
+
+        return IncomingPacketCallbacks{
+            .ctx = @ptrCast(self),
+            .tptr = t_ptr,
+            .local_identity = &self.identity,
+
+            // Time
+            .now = struct {
+                fn f(ctx: ?*anyopaque) i64 {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return node.now;
+                }
+            }.f,
+
+            // Topology
+            .topologyShouldInboundPathBeTrusted = struct {
+                fn f(_: ?*anyopaque, _: *const InetAddress, _: u64) bool {
+                    return false; // TODO: Check trusted paths
+                }
+            }.f,
+
+            .topologyGetPeer = struct {
+                fn f(ctx: ?*anyopaque, _: ?*anyopaque, addr: u64) ?*anyopaque {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    const peer_addr = Address.init(addr);
+                    return @ptrCast(node.topology.getPeer(peer_addr));
+                }
+            }.f,
+
+            // Switch
+            .switchRequestWhois = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: u64) void {
+                    // TODO: Request WHOIS via switch
+                }
+            }.f,
+
+            // Node
+            .nodeStatsLogVerb = struct {
+                fn f(_: ?*anyopaque, _: u32, _: u32) void {
+                    // TODO: Log verb statistics
+                }
+            }.f,
+
+            .nodePostEvent = struct {
+                fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, event: u32, data: ?*const anyopaque) void {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    node.callbacks.event(node.callbacks.ctx, tptr, event, data);
+                }
+            }.f,
+
+            // Peer operations
+            .peerKey = struct {
+                fn f(_: ?*anyopaque, peer: ?*anyopaque) *const [32]u8 {
+                    const Peer = @import("peer.zig").Peer;
+                    const p: *Peer = @ptrCast(@alignCast(peer.?));
+                    // Return first 32 bytes of the 48-byte ECDH key for Salsa20
+                    const key_48 = p.key();
+                    return @ptrCast(key_48);
+                }
+            }.f,
+
+            .peerAesKeys = struct {
+                fn f(_: ?*anyopaque, peer: ?*anyopaque) ?*const [2]IncomingAes {
+                    const Peer = @import("peer.zig").Peer;
+                    const p: *Peer = @ptrCast(@alignCast(peer.?));
+                    return p.aesKeys();
+                }
+            }.f,
+
+            .peerAesKeysIfSupported = struct {
+                fn f(_: ?*anyopaque, peer: ?*anyopaque) ?*const [2]IncomingAes {
+                    const Peer = @import("peer.zig").Peer;
+                    const p: *Peer = @ptrCast(@alignCast(peer.?));
+                    return p.aesKeysIfSupported();
+                }
+            }.f,
+
+            .peerPublicKey = struct {
+                fn f(_: ?*anyopaque, peer: ?*anyopaque) *const IncomingEcc.Public {
+                    const Peer = @import("peer.zig").Peer;
+                    const p: *Peer = @ptrCast(@alignCast(peer.?));
+                    return p.identity().publicKey();
+                }
+            }.f,
+
+            .peerAddress = struct {
+                fn f(_: ?*anyopaque, peer: ?*anyopaque) u64 {
+                    const Peer = @import("peer.zig").Peer;
+                    const p: *Peer = @ptrCast(@alignCast(peer.?));
+                    return p.address().toInt();
+                }
+            }.f,
+
+            .peerReceived = struct {
+                fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, peer: ?*anyopaque, path: ?*anyopaque, hops: u32, packet_id: u64, payload_len: u32, verb_val: u32, in_re_packet_id: u64, in_re_verb: u32, trust_established: bool, network_id: u64, flow_id: i32) void {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    const Peer = @import("peer.zig").Peer;
+                    const Path = @import("path.zig").Path;
+                    const Verb = @import("packet.zig").Verb;
+
+                    const p: *Peer = @ptrCast(@alignCast(peer.?));
+                    const pth: *Path = @ptrCast(@alignCast(path.?));
+                    const v: Verb = @enumFromInt(verb_val);
+                    const in_re_v: Verb = @enumFromInt(in_re_verb);
+
+                    p.received(tptr, pth, hops, packet_id, payload_len, v, in_re_packet_id, in_re_v, trust_established, network_id, flow_id, node.now);
+                }
+            }.f,
+
+            .peerRecordIncomingInvalidPacket = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) void {
+                    // TODO: Record invalid packet for rate limiting
+                }
+            }.f,
+
+            .peerRecordOutgoingPacket = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u32, _: u32, _: i32, _: i64) void {
+                    // TODO: Record outgoing packet
+                }
+            }.f,
+
+            .peerRateGateQoS = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: ?*anyopaque) bool {
+                    return true; // TODO: Implement QoS rate gating
+                }
+            }.f,
+
+            .peerReceivedQoS = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: i64, _: u32, _: [*]const u64, _: [*]const u16) void {
+                    // TODO: Process received QoS data
+                }
+            }.f,
+
+            .peerRateGatePathNegotiation = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: ?*anyopaque) bool {
+                    return true; // TODO: Rate gate path negotiation
+                }
+            }.f,
+
+            .peerProcessIncomingPathNegotiationRequest = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: ?*anyopaque, _: i16) void {
+                    // TODO: Process path negotiation
+                }
+            }.f,
+
+            .peerFlowHashingSupported = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque) bool {
+                    return false; // TODO: Check if peer supports flow hashing
+                }
+            }.f,
+
+            // Path operations
+            .pathSend = struct {
+                fn f(ctx: ?*anyopaque, path: ?*anyopaque, tptr: ?*anyopaque, data: [*]const u8, len: u32, _: i64) void {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    // For now, send via primary socket using the path's address
+                    // In a real implementation, this would use the path's local socket
+                    if (path) |p| {
+                        const Path = @import("path.zig").Path;
+                        const path_obj: *Path = @ptrCast(@alignCast(p));
+                        const remote_addr = path_obj.address();
+                        // Send using node's wireSend callback with socket 0
+                        node.callbacks.wireSend(
+                            node.callbacks.ctx,
+                            tptr,
+                            0, // local_socket (use primary)
+                            remote_addr,
+                            data,
+                            len,
+                            64, // ttl
+                        );
+                    }
+                }
+            }.f,
+
+            .pathAddress = struct {
+                var stub_address: InetAddress = InetAddress.initV4([4]u8{127, 0, 0, 1}, 9993);
+
+                fn f(_: ?*anyopaque, path: ?*anyopaque) *const InetAddress {
+                    if (path) |p| {
+                        const Path = @import("path.zig").Path;
+                        const path_obj: *Path = @ptrCast(@alignCast(p));
+                        return path_obj.address();
+                    }
+                    // Return stub address if no path
+                    return &stub_address;
+                }
+            }.f,
+
+            .pathLocalSocket = struct {
+                fn f(_: ?*anyopaque, path: ?*anyopaque) i64 {
+                    if (path) |p| {
+                        const Path = @import("path.zig").Path;
+                        const path_obj: *Path = @ptrCast(@alignCast(p));
+                        return path_obj.localSocket();
+                    }
+                    return 0; // Default socket
+                }
+            }.f,
+
+            .pathRateGateEchoRequest = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64) bool {
+                    return true; // TODO: Rate gate echo requests
+                }
+            }.f,
+
+            // Trace operations (logging/debugging)
+            .traceIncomingPacketMacFailure = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u32, _: [*:0]const u8) void {
+                    std.debug.print("  ✗ MAC verification failure\n", .{});
+                }
+            }.f,
+
+            .traceIncomingPacketInvalid = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u32, _: u32, _: [*:0]const u8) void {
+                    std.debug.print("  ✗ Invalid packet\n", .{});
+                }
+            }.f,
+
+            .traceIncomingPacketDroppedHELLO = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: [*:0]const u8) void {
+                    std.debug.print("  ✗ Dropped HELLO packet\n", .{});
+                }
+            }.f,
+
+            // Identity verification
+            .nodeRateGateIdentityVerification = struct {
+                fn f(_: ?*anyopaque, _: i64, _: *const InetAddress) bool {
+                    return true; // TODO: Rate gate identity verification
+                }
+            }.f,
+
+            .peerIdentity = struct {
+                fn f(_: ?*anyopaque, peer: ?*anyopaque) *const Identity {
+                    const Peer = @import("peer.zig").Peer;
+                    const p: *Peer = @ptrCast(@alignCast(peer.?));
+                    return p.identity();
+                }
+            }.f,
+
+            .peerSetRemoteVersion = struct {
+                fn f(_: ?*anyopaque, peer: ?*anyopaque, proto: u32, major: u32, minor: u32, rev: u32) void {
+                    const Peer = @import("peer.zig").Peer;
+                    const p: *Peer = @ptrCast(@alignCast(peer.?));
+                    p.setRemoteVersion(@intCast(proto), @intCast(major), @intCast(minor), @intCast(rev));
+                }
+            }.f,
+
+            // Additional Topology callbacks
+            .topologyAddPeer = struct {
+                fn f(ctx: ?*anyopaque, _: ?*anyopaque, new_identity: *const Identity) ?*anyopaque {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    const Peer = @import("peer.zig").Peer;
+                    // Create a new Peer from the identities (ECDH key agreement)
+                    const peer = Peer.create(&node.identity, new_identity) orelse return null;
+                    return @ptrCast(node.topology.addPeer(&peer));
+                }
+            }.f,
+
+            .topologyIsUpstream = struct {
+                fn f(_: ?*anyopaque, _: *const Identity) bool {
+                    return false; // TODO: Check if identity is root server
+                }
+            }.f,
+
+            .topologyPlanetWorldId = struct {
+                fn f(_: ?*anyopaque) u64 {
+                    return 0; // TODO: Return planet world ID
+                }
+            }.f,
+
+            .topologyPlanetWorldTimestamp = struct {
+                fn f(_: ?*anyopaque) u64 {
+                    return 0; // TODO: Return planet timestamp
+                }
+            }.f,
+
+            .topologySerializePlanet = struct {
+                fn f(_: ?*anyopaque, _: [*]u8, _: u32) u32 {
+                    return 0; // TODO: Serialize planet world
+                }
+            }.f,
+
+            .topologySerializeUpdatedMoons = struct {
+                fn f(_: ?*anyopaque, _: [*]const u64, _: [*]const u64, _: u32, _: [*]u8, _: u32) u32 {
+                    return 0; // TODO: Serialize moon updates
+                }
+            }.f,
+
+            .topologyShouldAcceptWorldUpdateFrom = struct {
+                fn f(_: ?*anyopaque, _: u64) bool {
+                    return false; // TODO: Check if world update should be accepted
+                }
+            }.f,
+
+            .topologyAddWorld = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: [*]const u8, _: u32) bool {
+                    return false; // TODO: Add world from serialized data
+                }
+            }.f,
+
+            .selfAwarenessIam = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: i64, _: *const InetAddress, _: *const InetAddress, _: bool, _: i64) void {
+                    // TODO: Record externally observed address
+                }
+            }.f,
+
+            .pathUpdateLatency = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: i64) void {
+                    // TODO: Update path latency
+                }
+            }.f,
+
+            // Network operation callbacks
+            .nodeGetNetwork = struct {
+                fn f(ctx: ?*anyopaque, nwid: u64) ?*anyopaque {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return @ptrCast(node.getNetwork(nwid));
+                }
+            }.f,
+
+            .nodeExpectingReplyTo = struct {
+                fn f(_: ?*anyopaque, _: u64) bool {
+                    return false; // TODO: Check if expecting reply
+                }
+            }.f,
+
+            .networkController = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque) u64 {
+                    return 0; // TODO: Get network controller address
+                }
+            }.f,
+
+            .networkSetNotFound = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) void {
+                    // TODO: Mark network as not found
+                }
+            }.f,
+
+            .networkSetAccessDenied = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) void {
+                    // TODO: Mark network as access denied
+                }
+            }.f,
+
+            .networkGate = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) bool {
+                    return true; // TODO: Check if peer is allowed on network
+                }
+            }.f,
+
+            .networkPeerRequestedCredentials = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: i64) void {
+                    // TODO: Handle credential request
+                }
+            }.f,
+
+            .networkConfigHasCom = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque) bool {
+                    return false; // TODO: Check if network has COM
+                }
+            }.f,
+
+            .networkSetAuthenticationRequired = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: [*:0]const u8) void {
+                    // TODO: Set authentication required
+                }
+            }.f,
+
+            .networkHandleConfigChunk = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: [*]const u8, _: u32, _: u32) void {
+                    // TODO: Handle network config chunk
+                }
+            }.f,
+
+            .multicasterRemove = struct {
+                fn f(_: ?*anyopaque, _: u64, _: *const [6]u8, _: u32, _: u64) void {
+                    // TODO: Remove multicast subscription
+                }
+            }.f,
+
+            .multicasterAddMultiple = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: u64, _: *const [6]u8, _: u32, _: [*]const u8, _: u32, _: u32) void {
+                    // TODO: Add multiple multicast members
+                }
+            }.f,
+
+            .switchDoAnythingWaitingForPeer = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) void {
+                    // TODO: Process packets waiting for this peer
+                }
+            }.f,
+
+            .networkAddCredentialCOM = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: [*]const u8, _: u32) bool {
+                    return false; // TODO: Add COM credential to network
+                }
+            }.f,
+
+            // WHOIS / Rendezvous callbacks
+            .topologyAmUpstream = struct {
+                fn f(_: ?*anyopaque) bool {
+                    return false; // TODO: Check if we are an upstream node
+                }
+            }.f,
+
+            .peerRateGateInboundWhoisRequest = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64) bool {
+                    return true; // TODO: Rate gate WHOIS requests
+                }
+            }.f,
+
+            .topologyGetIdentity = struct {
+                fn f(ctx: ?*anyopaque, _: ?*anyopaque, addr: u64) ?*const Identity {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    const peer_addr = Address.init(addr);
+                    return node.topology.getIdentity(peer_addr);
+                }
+            }.f,
+
+            .nodeShouldUsePathForZeroTierTraffic = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: i64, _: *const InetAddress) bool {
+                    return true; // TODO: Check if path should be used
+                }
+            }.f,
+
+            .nodePrng = struct {
+                fn f(ctx: ?*anyopaque) u64 {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    // Simple pseudo-random based on timestamp
+                    return @as(u64, @intCast(node.now)) *% 6364136223846793005 +% 1442695040888963407;
+                }
+            }.f,
+
+            .nodePutPacket = struct {
+                fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, local_socket: i64, remote_addr: *const InetAddress, data: [*]const u8, len: u32, ttl: u32) void {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    node.putPacket(tptr, local_socket, remote_addr, data, len, @intCast(ttl));
+                }
+            }.f,
+
+            .peerAttemptToContactAt = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: i64, _: bool) void {
+                    // TODO: Attempt to contact peer at address
+                }
+            }.f,
+
+            // Frame / Network callbacks
+            .networkMac = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque) MAC {
+                    return MAC.init(0); // TODO: Return network MAC address
+                }
+            }.f,
+
+            .networkUserPtr = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque) ?*anyopaque {
+                    return null; // TODO: Return network user pointer
+                }
+            }.f,
+
+            .networkFilterIncomingPacket = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: *const MAC, _: *const MAC, _: [*]const u8, _: u32, _: u32, _: u32) i32 {
+                    return 1; // TODO: Filter incoming packet (1 = accept)
+                }
+            }.f,
+
+            .pmPutFrame = struct {
+                fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, nwid: u64, user_ptr: ?*anyopaque, source_mac: *const MAC, dest_mac: *const MAC, ethertype: u32, vlan_id: u32, frame_data: *const anyopaque, frame_len: u32, flow_id: i32) void {
+                    _ = flow_id;
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    node.putFrame(tptr, nwid, @ptrCast(@constCast(&user_ptr)), source_mac, dest_mac, ethertype, vlan_id, @ptrCast(frame_data), frame_len);
+                }
+            }.f,
+
+            // Multicast callbacks
+            .multicasterAdd = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: u64, _: *const MulticastGroup, _: u64) void {
+                    // TODO: Add multicast group subscription
+                }
+            }.f,
+
+            .networkPushCredentials = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: ?*anyopaque, _: i64, _: [*]const u8, _: u32) void {
+                    // TODO: Process network credentials
+                }
+            }.f,
+
+            .networkControllerHandleConfigRequest = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u64, _: *const anyopaque) void {
+                    // TODO: Handle network config request (controller side)
+                }
+            }.f,
+
+            .networkHandleConfig = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: [*]const u8, _: u32) void {
+                    // TODO: Handle network config (client side)
+                }
+            }.f,
+
+            .multicasterGather = struct {
+                fn f(_: ?*anyopaque, _: u64, _: u64, _: *const MulticastGroup, _: *Packet, _: u32) u32 {
+                    return 0; // TODO: Gather multicast subscribers
+                }
+            }.f,
+
+            .multicasterReceiveMulticastFrame = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: *const MulticastGroup, _: [*]const u8, _: u32, _: u32) void {
+                    // TODO: Receive multicast frame
+                }
+            }.f,
+
+            .peerReceivePushDirectPaths = struct {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: [*]const u8, _: u32, _: i64) void {
+                    // TODO: Process direct path hints
                 }
             }.f,
         };
