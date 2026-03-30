@@ -903,10 +903,14 @@ pub const Node = struct {
                     node.topology._upstreams_m.lock();
                     defer node.topology._upstreams_m.unlock();
 
+                    std.debug.print("  [WHOIS] Sending to {d} upstreams\n", .{node.topology._upstream_count});
+
                     // Send to all upstream addresses (root servers)
                     var i: usize = 0;
                     while (i < node.topology._upstream_count) : (i += 1) {
                         const upstream_addr = node.topology._upstream_addresses[i];
+                        var addr_buf: [10]u8 = undefined;
+                        std.debug.print("  [WHOIS] Trying upstream {s}\n", .{upstream_addr.toString(&addr_buf)});
 
                         // Try to find a peer for this upstream address
                         node.topology._peers_m.lock();
@@ -923,8 +927,10 @@ pub const Node = struct {
 
                         // If we have a peer for this upstream, send via that peer
                         if (found_peer) |peer| {
-                            const peer_path = peer.getAppropriatePath(now, false);
+                            const peer_path = peer.getAppropriatePath(now, true); // include_expired=true for roots
                             if (peer_path) |path| {
+                                var ip_buf: [64]u8 = undefined;
+                                std.debug.print("  [WHOIS] Sending via path {s}\n", .{path.address().toString(&ip_buf)});
                                 const pkt_data = pkt.buf.data();
                                 node.callbacks.wireSend(
                                     node.callbacks.ctx,
@@ -936,7 +942,11 @@ pub const Node = struct {
                                     64,
                                 );
                                 sent = true;
+                            } else {
+                                std.debug.print("  [WHOIS] Peer found but no path!\n", .{});
                             }
+                        } else {
+                            std.debug.print("  [WHOIS] No peer found for upstream\n", .{});
                         }
                     }
 
@@ -975,12 +985,16 @@ pub const Node = struct {
                     // Build NETWORK_CONFIG_REQUEST packet
                     var pkt = Packet.initNew(controller, node.identity.address(), .network_config_request);
 
-                    // Payload: network ID (8 bytes)
+                    // Expand packet to hold payload before writing
                     const pkt_idx = @import("packet.zig").network_config_request_idx;
+                    const meta_len: u16 = @intCast(@min(metadata.len, 0xFFFF));
+                    const total_size = pkt_idx.idx_dict + meta_len;
+                    pkt.buf.setSize(total_size) catch return;
+
+                    // Payload: network ID (8 bytes)
                     pkt.buf.setAt(u64, pkt_idx.idx_network_id, @byteSwap(nwid)) catch return;
 
                     // Payload: metadata dict length (2 bytes) + metadata
-                    const meta_len: u16 = @intCast(@min(metadata.len, 0xFFFF));
                     pkt.buf.setAt(u16, pkt_idx.idx_dict_len, @byteSwap(meta_len)) catch return;
 
                     if (meta_len > 0) {
@@ -988,16 +1002,15 @@ pub const Node = struct {
                         @memcpy(dest[0..meta_len], metadata[0..meta_len]);
                     }
 
-                    // Update packet size
-                    pkt.buf.setSize(pkt_idx.idx_dict + meta_len) catch return;
-
                     // Include config revision/timestamp if we have existing config
                     _ = config_revision;
                     _ = config_timestamp;
 
                     // Send via switch
+                    var ctrl_buf: [10]u8 = undefined;
+                    std.debug.print("  [CONFIG_REQ] Sending packet to controller {s}, size={d}\n", .{ controller.toString(&ctrl_buf), pkt.buf.size() });
                     const switch_cbs = node.createSwitchCallbacks();
-                    node.switch_engine.send(null, &pkt, true, nwid, 0, &switch_cbs);
+                    node.switch_engine.send(@ptrCast(node), &pkt, true, nwid, 0, &switch_cbs);
                 }
             }.f,
 

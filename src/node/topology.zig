@@ -234,8 +234,8 @@ pub const Topology = struct {
     // ── Construction ──────────────────────────────────────────
 
     /// Create a new Topology database.
-    pub fn create(my_identity: *const Identity) Topology {
-        var self: Topology = undefined;
+    /// Initializes the topology in-place to avoid stack overflow from large arrays.
+    pub fn create(self: *Topology, my_identity: *const Identity) void {
         self._my_identity = my_identity.*;
 
         self._peers = [_]PeerEntry{PeerEntry.init()} ** max_peers;
@@ -264,8 +264,6 @@ pub const Topology = struct {
         self._state_put_fn = null;
         self._state_delete_fn = null;
         self._cb_ctx = null;
-
-        return self;
     }
 
     /// Set callbacks for Node integration.
@@ -1098,8 +1096,8 @@ pub const Topology = struct {
                     self._upstream_addresses[self._upstream_count] = r.identity.address();
                     self._upstream_count += 1;
                 }
-                // Ensure peer exists for this root
-                self._ensurePeerForRoot(&r.identity);
+                // Ensure peer exists for this root with its stable endpoints
+                self._ensurePeerForRootWithEndpoints(&r.identity, &r.stable_endpoints, r.endpoint_count);
             }
         }
 
@@ -1114,7 +1112,7 @@ pub const Topology = struct {
                         self._upstream_addresses[self._upstream_count] = r.identity.address();
                         self._upstream_count += 1;
                     }
-                    self._ensurePeerForRoot(&r.identity);
+                    self._ensurePeerForRootWithEndpoints(&r.identity, &r.stable_endpoints, r.endpoint_count);
                 }
             }
         }
@@ -1133,26 +1131,58 @@ pub const Topology = struct {
         return false;
     }
 
-    /// Ensure a peer entry exists for a root identity.
+    /// Ensure a peer entry exists for a root, including its stable endpoints as paths.
     /// Assumes _peers_m is locked.
     fn _ensurePeerForRoot(self: *Topology, root_identity: *const Identity) void {
+        self._ensurePeerForRootWithEndpoints(root_identity, null, 0);
+    }
+
+    fn _ensurePeerForRootWithEndpoints(
+        self: *Topology,
+        root_identity: *const Identity,
+        endpoints: ?[]const InetAddress,
+        endpoint_count: u32,
+    ) void {
         const addr = root_identity.address();
+
         // Check if peer already exists
+        var existing_peer: ?*Peer = null;
         for (&self._peers) |*entry| {
             if (entry.in_use and entry.addr.eql(addr)) {
-                return;
+                existing_peer = &entry.peer;
+                break;
             }
         }
 
-        // Create a new peer via ECDH key agreement
-        if (Peer.create(&self._my_identity, root_identity)) |peer| {
-            for (&self._peers) |*entry| {
-                if (!entry.in_use) {
-                    entry.addr = addr;
-                    entry.peer = peer;
-                    entry.in_use = true;
-                    self._peer_count += 1;
-                    return;
+        // Create new peer if needed
+        if (existing_peer == null) {
+            if (Peer.create(&self._my_identity, root_identity)) |peer| {
+                for (&self._peers) |*entry| {
+                    if (!entry.in_use) {
+                        entry.addr = addr;
+                        entry.peer = peer;
+                        entry.in_use = true;
+                        self._peer_count += 1;
+                        existing_peer = &entry.peer;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Add stable endpoints as paths
+        if (existing_peer) |peer| {
+            if (endpoints) |eps| {
+                const now = std.time.milliTimestamp();
+                var i: u32 = 0;
+                while (i < endpoint_count and i < eps.len) : (i += 1) {
+                    if (eps[i].port() != 0) {
+                        var path = Path.init();
+                        path._addr = eps[i];
+                        path._local_socket = -1;
+                        path._last_in = now; // Mark as recently seen so it's not expired
+                        _ = peer.addPath(&path, now);
+                    }
                 }
             }
         }

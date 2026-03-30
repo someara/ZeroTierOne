@@ -22,6 +22,8 @@ const InetAddress = @import("node/inet_address.zig").InetAddress;
 const Packet = @import("node/packet.zig").Packet;
 const TunDevice = @import("node/tun_device.zig").TunDevice;
 const HttpApi = @import("node/http_api.zig").HttpApi;
+const World = @import("node/world.zig").World;
+const Buffer = @import("node/buffer.zig").Buffer;
 
 /// Service context - holds all state for the running service
 pub const Service = struct {
@@ -42,6 +44,9 @@ pub const Service = struct {
     // HTTP API server
     http_api: ?*HttpApi,
     auth_token: ?[]const u8,
+
+    // Home directory for state persistence
+    home_dir: ?[]const u8,
 
     // Control flags
     running: bool,
@@ -81,12 +86,24 @@ pub const Service = struct {
             .event = nodeEvent,
         };
 
+        // Set home dir for state persistence callbacks (before Node.init)
+        g_home_dir = home_dir;
+
+        // Ensure home directory exists
+        if (home_dir) |dir| {
+            std.fs.makeDirAbsolute(dir) catch |err| {
+                if (err != error.PathAlreadyExists) {
+                    std.debug.print("  ✗ Failed to create home dir: {}\n", .{err});
+                }
+            };
+        }
+
         // Initialize Node
         const config = Config{};
         const now = std.time.milliTimestamp();
         var node = try Node.init(allocator, null, null, &config, node_callbacks, now);
         errdefer node.deinit();
-        _ = home_dir; // TODO: Use home_dir for state persistence
+        // home_dir stored in service struct for state persistence
 
         std.debug.print("  ✓ Node initialized with address: {any}\n", .{node.identity.address()});
 
@@ -100,12 +117,16 @@ pub const Service = struct {
             .tun = null,
             .http_api = null,
             .auth_token = null,
+            .home_dir = home_dir,
             .running = false,
             .terminate = false,
         };
 
         // Update Node callbacks to point to service
         service.node.callbacks.ctx = &service;
+
+        // Load planet world (root servers)
+        service.loadPlanet();
 
         return service;
     }
@@ -176,6 +197,117 @@ pub const Service = struct {
         }
 
         return result;
+    }
+
+    /// Load planet world (root servers) from home dir or use embedded default
+    fn loadPlanet(self: *Service) void {
+        // Try to load from {home_dir}/planet
+        if (self.home_dir) |dir| {
+            var path_buf: [512]u8 = undefined;
+            const path = std.fmt.bufPrint(&path_buf, "{s}/planet", .{dir}) catch return;
+            const file = std.fs.openFileAbsolute(path, .{}) catch {
+                // No planet file — use embedded default
+                self.loadEmbeddedPlanet();
+                return;
+            };
+            defer file.close();
+
+            var data: [4096]u8 = undefined;
+            const n = file.read(&data) catch {
+                self.loadEmbeddedPlanet();
+                return;
+            };
+
+            if (n > 0) {
+                var world = World.init();
+                var buf = Buffer(4096).initFrom(data[0..n]) catch {
+                    self.loadEmbeddedPlanet();
+                    return;
+                };
+                _ = world.deserialize(4096, &buf, 0) catch {
+                    std.debug.print("  ✗ Failed to parse planet file\n", .{});
+                    self.loadEmbeddedPlanet();
+                    return;
+                };
+                if (self.node.topology.addWorld(&world, true)) {
+                    std.debug.print("  ✓ Planet loaded from {s} (world ID {d})\n", .{ path, world.id() });
+                } else {
+                    std.debug.print("  ✗ Planet rejected by topology\n", .{});
+                    self.loadEmbeddedPlanet();
+                }
+                return;
+            }
+        }
+        self.loadEmbeddedPlanet();
+    }
+
+    fn loadEmbeddedPlanet(self: *Service) void {
+        // ZeroTier Earth planet (standard root servers)
+        const planet_data = [_]u8{
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x08, 0xea, 0xc9, 0x0a, 0x00, 0x00, 0x01,
+            0x94, 0xdb, 0x79, 0x5b, 0x4e, 0xb8, 0xb3, 0x88, 0xa4, 0x69, 0x22, 0x14,
+            0x91, 0xaa, 0x9a, 0xcd, 0x66, 0xcc, 0x76, 0x4c, 0xde, 0xfd, 0x56, 0x03,
+            0x9f, 0x10, 0x67, 0xae, 0x15, 0xe6, 0x9c, 0x6f, 0xb4, 0x2d, 0x7b, 0x55,
+            0x33, 0x0e, 0x3f, 0xda, 0xac, 0x52, 0x9c, 0x07, 0x92, 0xfd, 0x73, 0x40,
+            0xa6, 0xaa, 0x21, 0xab, 0xa8, 0xa4, 0x89, 0xfd, 0xae, 0xa4, 0x4a, 0x39,
+            0xbf, 0x2d, 0x00, 0x65, 0x9a, 0xc9, 0xc8, 0x18, 0xeb, 0x5e, 0x6e, 0x69,
+            0x7f, 0x9c, 0xb6, 0x62, 0xcd, 0x71, 0xdb, 0x83, 0xd3, 0x95, 0x61, 0x9f,
+            0xbf, 0xed, 0x1a, 0x81, 0xe6, 0x5e, 0xf2, 0x2e, 0xeb, 0x4a, 0xb4, 0xb4,
+            0x2f, 0x97, 0x8a, 0x22, 0x27, 0xaa, 0xb9, 0x34, 0x9d, 0xa3, 0x87, 0xa6,
+            0x94, 0xb0, 0xd3, 0x41, 0x83, 0x9d, 0xc3, 0x94, 0x2a, 0xcf, 0x02, 0xf6,
+            0xeb, 0x09, 0xd9, 0xad, 0xe6, 0x1c, 0x63, 0xa7, 0x56, 0xc7, 0xa9, 0xb7,
+            0x0c, 0x59, 0xde, 0x1b, 0xfc, 0x93, 0x76, 0x9f, 0x10, 0x79, 0xc7, 0x2b,
+            0x43, 0xa0, 0xdd, 0xde, 0x13, 0xbd, 0x42, 0x53, 0x38, 0x79, 0xe6, 0x2b,
+            0xe6, 0x0d, 0x5d, 0x93, 0xe6, 0x96, 0x8b, 0xe6, 0x43, 0x04, 0xca, 0xfe,
+            0x80, 0xed, 0x74, 0x00, 0x1e, 0x86, 0xa3, 0xff, 0x86, 0x17, 0xbe, 0xf5,
+            0x37, 0xb9, 0x9b, 0xa7, 0x14, 0x40, 0x8b, 0xf0, 0xce, 0x0e, 0x14, 0x3f,
+            0x8a, 0xcf, 0x6e, 0xc9, 0x3e, 0x94, 0xd4, 0x59, 0x7a, 0xaf, 0x16, 0x09,
+            0x7d, 0x4f, 0x1c, 0xec, 0x69, 0xb4, 0x4f, 0xda, 0x99, 0x66, 0x5c, 0xa9,
+            0x9c, 0x57, 0xf4, 0xa1, 0x66, 0x41, 0xb9, 0xe3, 0x9b, 0x2e, 0x6d, 0x31,
+            0x80, 0xdc, 0x8f, 0x1a, 0xe8, 0xde, 0x89, 0xf8, 0x00, 0x02, 0x04, 0xb9,
+            0x98, 0x43, 0x91, 0x27, 0x09, 0x06, 0x2a, 0x02, 0x6e, 0xa0, 0xc8, 0x7f,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x27, 0x09,
+            0x77, 0x8c, 0xde, 0x71, 0x90, 0x00, 0x3f, 0x66, 0x81, 0xa9, 0x9e, 0x5a,
+            0xd1, 0x89, 0x5e, 0x9f, 0xba, 0x33, 0xe6, 0x21, 0x2d, 0x44, 0x54, 0xe1,
+            0x68, 0xbc, 0xec, 0x71, 0x12, 0x10, 0x1b, 0xf0, 0x00, 0x95, 0x6e, 0xd8,
+            0xe9, 0x2e, 0x42, 0x89, 0x2c, 0xb6, 0xf2, 0xec, 0x41, 0x08, 0x81, 0xa8,
+            0x4a, 0xb1, 0x9d, 0xa5, 0x0e, 0x12, 0x87, 0xba, 0x3d, 0x92, 0x6c, 0x3a,
+            0x1f, 0x75, 0x5c, 0xcc, 0xf2, 0x99, 0xa1, 0x20, 0x70, 0x55, 0x00, 0x02,
+            0x04, 0x67, 0xc3, 0x67, 0x42, 0x27, 0x09, 0x06, 0x26, 0x05, 0x98, 0x80,
+            0x04, 0x00, 0x00, 0xc3, 0x02, 0x54, 0xf2, 0xbc, 0xa1, 0xf7, 0x00, 0x19,
+            0x27, 0x09, 0xca, 0xfe, 0xfd, 0x67, 0x17, 0x00, 0x4c, 0x74, 0xed, 0xe0,
+            0x18, 0x50, 0xe7, 0xe6, 0x45, 0xfb, 0x77, 0x9d, 0x70, 0x0c, 0x45, 0xb9,
+            0xaf, 0x91, 0xa0, 0x48, 0xcc, 0x85, 0x8a, 0xd0, 0xc4, 0xf2, 0x51, 0x74,
+            0xbf, 0x29, 0xb4, 0x60, 0xe5, 0xcc, 0x3e, 0x98, 0xcd, 0x84, 0xee, 0x30,
+            0xfe, 0xa5, 0x7c, 0x14, 0xf1, 0x49, 0x5a, 0xdd, 0x0c, 0xc0, 0xe5, 0xb1,
+            0x9d, 0x78, 0xaf, 0xcd, 0x14, 0x17, 0x0c, 0x57, 0x56, 0x18, 0x08, 0x00,
+            0x00, 0x02, 0x04, 0x4f, 0x7f, 0x9f, 0xbb, 0x27, 0x09, 0x06, 0x2a, 0x02,
+            0x6e, 0xa0, 0xd3, 0x68, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x99, 0x93, 0x27, 0x09, 0xca, 0xfe, 0x04, 0xeb, 0xa9, 0x00, 0x6c, 0x6a,
+            0x9d, 0x1d, 0xea, 0x55, 0xc1, 0x61, 0x6b, 0xfe, 0x2a, 0x2b, 0x8f, 0x0f,
+            0xf9, 0xa8, 0xca, 0xca, 0xf7, 0x03, 0x74, 0xfb, 0x1f, 0x39, 0xe3, 0xbe,
+            0xf8, 0x1c, 0xbf, 0xeb, 0xef, 0x17, 0xb7, 0x22, 0x82, 0x68, 0xa0, 0xa2,
+            0xa2, 0x9d, 0x34, 0x88, 0xc7, 0x52, 0x56, 0x5c, 0x6c, 0x96, 0x5c, 0xbd,
+            0x65, 0x06, 0xec, 0x24, 0x39, 0x7c, 0xc8, 0xa5, 0xd9, 0xd1, 0x52, 0x85,
+            0xa8, 0x7f, 0x00, 0x02, 0x04, 0x54, 0x11, 0x35, 0x9b, 0x27, 0x09, 0x06,
+            0x2a, 0x02, 0x6e, 0xa0, 0xd4, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x99, 0x93, 0x27, 0x09,
+        };
+
+        var world = World.init();
+        var buf = Buffer(4096).initFrom(&planet_data) catch {
+            std.debug.print("  ✗ Failed to create planet buffer\n", .{});
+            return;
+        };
+        _ = world.deserialize(4096, &buf, 0) catch {
+            std.debug.print("  ✗ Failed to parse embedded planet\n", .{});
+            return;
+        };
+        if (self.node.topology.addWorld(&world, true)) {
+            std.debug.print("  ✓ Planet loaded (embedded, world ID {d})\n", .{world.id()});
+        } else {
+            std.debug.print("  ✗ Embedded planet rejected\n", .{});
+        }
     }
 
     /// Bind UDP sockets for ZeroTier protocol
@@ -389,53 +521,83 @@ fn onPhyFdActivity(_: *PhySocket, _: *?*anyopaque, _: bool, _: bool) void {}
 
 // ── Node Callbacks ─────────────────────────────────────────────────────────
 
+// Module-level home dir for state callbacks (set before Node.init)
+var g_home_dir: ?[]const u8 = null;
+
+/// Map state object type to filename
+fn stateObjectPath(home_dir: []const u8, object_type: u32, buf: *[512]u8) ?[]const u8 {
+    const name = switch (object_type) {
+        0 => "identity.public",
+        1 => "identity.secret",
+        else => return null,
+    };
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ home_dir, name }) catch null;
+}
+
 /// Node callback: Get state object (identity, config, etc.)
 fn nodeStateObjectGet(
-    ctx: ?*anyopaque,
+    _: ?*anyopaque,
     _: ?*anyopaque,
     object_type: u32,
     _: [*]const u64,
-    _: [*]u8,
-    _: u32,
+    out_buf: [*]u8,
+    buf_len: u32,
 ) i32 {
-    _ = ctx;
+    const home_dir = g_home_dir orelse return 0;
 
-    // Return 0 = "not found" to trigger default behavior
-    // For now, let Node generate a new identity
-    if (object_type == 1) { // state_object_identity_secret
-        return 0; // Not found - generate new identity
+    var path_buf: [512]u8 = undefined;
+    const path = stateObjectPath(home_dir, object_type, &path_buf) orelse return 0;
+
+    const file = std.fs.openFileAbsolute(path, .{}) catch return 0;
+    defer file.close();
+
+    const bytes_read = file.read(out_buf[0..buf_len]) catch return 0;
+    if (bytes_read > 0) {
+        std.debug.print("  → Loaded state object type {d} ({d} bytes) from {s}\n", .{ object_type, bytes_read, path });
     }
-
-    return 0;
+    return @intCast(bytes_read);
 }
 
 /// Node callback: Store state object
 fn nodeStateObjectPut(
-    ctx: ?*anyopaque,
+    _: ?*anyopaque,
     _: ?*anyopaque,
     object_type: u32,
     _: [*]const u64,
     data: [*]const u8,
     len: u32,
 ) void {
-    _ = ctx;
+    const home_dir = g_home_dir orelse return;
 
-    if (object_type == 1) { // state_object_identity_secret
-        std.debug.print("  → Identity generated ({d} bytes)\n", .{len});
+    var path_buf: [512]u8 = undefined;
+    const path = stateObjectPath(home_dir, object_type, &path_buf) orelse return;
 
-        // TODO: Save identity to disk
-        // For now, just show we received it
-        _ = data;
-    }
+    const file = std.fs.createFileAbsolute(path, .{}) catch |err| {
+        std.debug.print("  ✗ Failed to save state object type {d}: {}\n", .{ object_type, err });
+        return;
+    };
+    defer file.close();
+
+    file.writeAll(data[0..len]) catch |err| {
+        std.debug.print("  ✗ Failed to write state object type {d}: {}\n", .{ object_type, err });
+        return;
+    };
+    std.debug.print("  → Saved state object type {d} ({d} bytes) to {s}\n", .{ object_type, len, path });
 }
 
 /// Node callback: Delete state object
 fn nodeStateObjectDelete(
     _: ?*anyopaque,
     _: ?*anyopaque,
-    _: u32,
+    object_type: u32,
     _: [*]const u64,
-) void {}
+) void {
+    const home_dir = g_home_dir orelse return;
+
+    var path_buf: [512]u8 = undefined;
+    const path = stateObjectPath(home_dir, object_type, &path_buf) orelse return;
+    std.fs.deleteFileAbsolute(path) catch {};
+}
 
 /// Node callback: Send packet on wire (UDP)
 fn nodeWireSend(
