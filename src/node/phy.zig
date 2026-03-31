@@ -158,6 +158,9 @@ pub const Phy = struct {
     no_delay: bool, // TCP_NODELAY (disable Nagle's algorithm)
     no_check: bool, // SO_NO_CHECK (disable UDP checksums)
 
+    // Reusable buffer for poll() to avoid repeated allocations
+    poll_fds: std.ArrayList(posix.pollfd),
+
     /// Initialize the Phy manager
     pub fn init(
         allocator: Allocator,
@@ -193,6 +196,10 @@ pub const Phy = struct {
             .wakeup_pipe = wakeup_pipe,
             .no_delay = no_delay,
             .no_check = no_check,
+            .poll_fds = std.ArrayList(posix.pollfd){
+                .items = &.{},
+                .capacity = 0,
+            },
         };
     }
 
@@ -206,6 +213,7 @@ pub const Phy = struct {
             self.allocator.destroy(sock_impl);
         }
         self.sockets.deinit(self.allocator);
+        self.poll_fds.deinit(self.allocator);
 
         // Close wake-up pipe
         posix.close(self.wakeup_pipe[0]);
@@ -445,9 +453,10 @@ pub const Phy = struct {
             return;
         }
 
-        // Build pollfd array
-        var pollfds = try self.allocator.alloc(posix.pollfd, self.sockets.items.len + 1);
-        defer self.allocator.free(pollfds);
+        // Resize pollfd buffer to fit current sockets (reuses allocation)
+        const needed_size = self.sockets.items.len + 1;
+        try self.poll_fds.resize(self.allocator, needed_size);
+        const pollfds = self.poll_fds.items;
 
         // Add wake-up pipe
         pollfds[0] = .{

@@ -81,6 +81,30 @@ pub const default_mtu = 2800;
 /// Maximum number of packet fragments we'll support (protocol max: 16).
 pub const max_packet_fragments = 7;
 
+/// Minimum length for fragment packets (header + fragment indicator)
+pub const proto_min_fragment_length = 64;
+
+/// Minimum length for complete protocol packets
+pub const proto_min_packet_length = 28;
+
+/// Index of fragment indicator in packet
+pub const packet_fragment_idx_fragment_indicator = 4;
+
+/// Value that indicates a packet is a fragment
+pub const packet_fragment_indicator = 255;
+
+/// Index of fragment number in packet
+pub const packet_fragment_idx_fragment_no = 5;
+
+/// Index of fragment total in packet
+pub const packet_fragment_idx_fragment_total = 6;
+
+/// Index of flags in packet
+pub const packet_idx_flags = 4;
+
+/// Flag indicating packet is fragmented
+pub const proto_flag_fragmented = 0x40;
+
 /// Size of RX queue.
 pub const rx_queue_size = 32;
 
