@@ -929,39 +929,19 @@ pub const Node = struct {
                         }
                         node.topology._peers_m.unlock();
 
-                        // If we have a peer for this upstream, re-address, armor and send
+                        // If we have a peer for this upstream, armor and send via ALL paths
                         if (found_peer) |peer| {
                             const PeerMod = @import("peer.zig");
                             var path_buf: [PeerMod.max_peer_network_paths]?*@import("path.zig").Path = undefined;
                             const path_count = peer.getAllPaths(&path_buf);
-                            if (path_count == 0) {
-                                std.debug.print("  [WHOIS] Peer found but no paths!\n", .{});
-                            }
 
-                            // Re-address the packet TO this root
+                            // Re-address, armor with peer key, send to each path
                             var addressed_pkt = pkt.*;
                             addressed_pkt.setDestination(upstream_addr);
 
-                            // Armor with peer's key
                             const peer_key = peer.key();
-                            const peer_aes = peer.aesKeysIfSupported();
-                            const peer_pub = peer.identity().publicKey();
-                            _ = peer_pub;
-                            _ = peer_aes;
-                            // Use only first 32 bytes of 48-byte key
                             var key32: [32]u8 = undefined;
                             @memcpy(&key32, peer_key[0..32]);
-
-                            // Debug: show key and packet info
-                            {
-                                var ubuf: [10]u8 = undefined;
-                                std.debug.print("  [WHOIS] To={s} Key[0..8]: {x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}\n", .{
-                                    upstream_addr.toString(&ubuf),
-                                    key32[0], key32[1], key32[2], key32[3],
-                                    key32[4], key32[5], key32[6], key32[7],
-                                });
-                                std.debug.print("  [WHOIS] Pkt size before armor: {d}\n", .{addressed_pkt.buf.size()});
-                            }
                             addressed_pkt.armor(&key32, true, false, null, null);
 
                             var pi: u32 = 0;
