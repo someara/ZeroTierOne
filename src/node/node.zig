@@ -926,7 +926,7 @@ pub const Node = struct {
                         }
                         node.topology._peers_m.unlock();
 
-                        // If we have a peer for this upstream, send via ALL paths
+                        // If we have a peer for this upstream, re-address, armor and send
                         if (found_peer) |peer| {
                             const PeerMod = @import("peer.zig");
                             var path_buf: [PeerMod.max_peer_network_paths]?*@import("path.zig").Path = undefined;
@@ -934,10 +934,21 @@ pub const Node = struct {
                             if (path_count == 0) {
                                 std.debug.print("  [WHOIS] Peer found but no paths!\n", .{});
                             }
+
+                            // Re-address the packet TO this root (WHOIS is sent to roots, not to the queried address)
+                            var addressed_pkt = pkt.*;
+                            addressed_pkt.setDestination(upstream_addr);
+
+                            // Armor with peer's key
+                            const peer_key = peer.key();
+                            const peer_aes = peer.aesKeysIfSupported();
+                            const peer_pub = peer.identity().publicKey();
+                            addressed_pkt.armor(peer_key[0..32], true, false, peer_aes, peer_pub);
+
                             var pi: u32 = 0;
                             while (pi < path_count) : (pi += 1) {
                                 if (path_buf[pi]) |path| {
-                                    const pkt_data = pkt.buf.data();
+                                    const pkt_data = addressed_pkt.buf.data();
                                     node.callbacks.wireSend(
                                         node.callbacks.ctx,
                                         null,
