@@ -380,7 +380,7 @@ fn genCondition(ctx: GenContext, kp: *const ecc.KeyPair) bool {
 ///
 /// `genmem` must be at least `gen_memory` (2 MiB) bytes. This function
 /// matches the C++ `_computeMemoryHardHash` exactly.
-fn computeMemoryHardHash(
+pub fn computeMemoryHardHash(
     public_key: *const [ecc.public_key_set_len]u8,
     digest: *[64]u8,
     genmem: []u8,

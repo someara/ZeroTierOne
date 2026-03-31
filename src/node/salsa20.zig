@@ -97,12 +97,8 @@ pub const Salsa20 = struct {
         std.debug.assert(in_buf.len == out_buf.len);
         if (in_buf.len == 0) return;
 
-        // Use SIMD path on ARM64 for large buffers
-        if (builtin.cpu.arch == .aarch64 and in_buf.len >= 64) {
-            simd_arm.salsa20_12_xor_neon(out_buf, in_buf, self.block_counter, self.key_data, self.nonce_data);
-        } else {
-            Salsa12.xor(out_buf, in_buf, self.block_counter, self.key_data, self.nonce_data);
-        }
+        // TODO: Re-enable SIMD after verifying correctness
+        Salsa12.xor(out_buf, in_buf, self.block_counter, self.key_data, self.nonce_data);
         self.block_counter += blocksConsumed(in_buf.len);
     }
 
@@ -119,12 +115,9 @@ pub const Salsa20 = struct {
         std.debug.assert(in_buf.len == out_buf.len);
         if (in_buf.len == 0) return;
 
-        // Use SIMD path on ARM64 for large buffers
-        if (builtin.cpu.arch == .aarch64 and in_buf.len >= 64) {
-            simd_arm.salsa20_20_xor_neon(out_buf, in_buf, self.block_counter, self.key_data, self.nonce_data);
-        } else {
-            Salsa20Cipher.xor(out_buf, in_buf, self.block_counter, self.key_data, self.nonce_data);
-        }
+        // TODO: Re-enable SIMD after verifying correctness
+        // Force scalar path for identity hash compatibility
+        Salsa20Cipher.xor(out_buf, in_buf, self.block_counter, self.key_data, self.nonce_data);
         self.block_counter += blocksConsumed(in_buf.len);
     }
 

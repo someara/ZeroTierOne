@@ -43,12 +43,8 @@ pub fn compute(
     data: []const u8,
     key: *const [key_len]u8,
 ) void {
-    // Use optimized implementation on ARM64 for buffers >= 64 bytes
-    if (builtin.cpu.arch == .aarch64 and data.len >= 64) {
-        simd_arm.compute(auth, data, key);
-    } else {
-        Poly1305.create(auth, data, key);
-    }
+    // TODO: Re-enable SIMD after verifying correctness
+    Poly1305.create(auth, data, key);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────

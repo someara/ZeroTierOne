@@ -243,7 +243,7 @@ pub const Node = struct {
     /// Process a packet received from the network.
     pub fn processWirePacket(
         self: *Self,
-        t_ptr: ?*anyopaque,
+        _: ?*anyopaque,
         now: i64,
         local_socket: i64,
         remote_addr: *const InetAddress,
@@ -252,11 +252,14 @@ pub const Node = struct {
     ) void {
         self.now = now;
 
+        // Minimum ZeroTier packet is 28 bytes (header only)
+        if (len < 28) return;
+
         // Create proper Switch callbacks
         const switch_callbacks = self.createSwitchCallbacks();
 
         self.switch_engine.onRemotePacket(
-            t_ptr,
+            @ptrCast(self),
             local_socket,
             remote_addr,
             data,
