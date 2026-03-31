@@ -656,11 +656,19 @@ fn nodeWireSend(
 
     if (sock) |s| {
         var ip_buf: [64]u8 = undefined;
+        const addr_str = remote_addr.toString(&ip_buf);
         std.debug.print("  ← UDP {d}b to {s} (v{s})\n", .{
-            len,
-            remote_addr.toString(&ip_buf),
+            len, addr_str,
             if (remote_addr.isV4()) "4" else "6",
         });
+        // Hex dump first packet for debugging
+        if (len > 0 and len < 100) {
+            std.debug.print("    HEX: ", .{});
+            for (data[0..len]) |b| {
+                std.debug.print("{x:0>2}", .{b});
+            }
+            std.debug.print("\n", .{});
+        }
         const sent = service.phy.udpSend(s, dest_addr, data[0..len]);
         if (!sent) {
             std.debug.print("  ✗ udpSend failed!\n", .{});

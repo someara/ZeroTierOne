@@ -173,9 +173,9 @@ pub const Node = struct {
         );
 
         if (n > 0) {
-            // Parse existing identity
-            buf[@intCast(n)] = 0;
-            const id_str = buf[0..@intCast(n)];
+            // Parse existing identity (trim whitespace from file)
+            const raw = buf[0..@intCast(n)];
+            const id_str = mem.trim(u8, raw, &std.ascii.whitespace);
 
             if (Identity.fromString(id_str)) |identity| {
                 if (identity.locallyValidate(allocator) catch false) {
@@ -935,7 +935,7 @@ pub const Node = struct {
                                 std.debug.print("  [WHOIS] Peer found but no paths!\n", .{});
                             }
 
-                            // Re-address the packet TO this root (WHOIS is sent to roots, not to the queried address)
+                            // Re-address the packet TO this root
                             var addressed_pkt = pkt.*;
                             addressed_pkt.setDestination(upstream_addr);
 
@@ -943,7 +943,23 @@ pub const Node = struct {
                             const peer_key = peer.key();
                             const peer_aes = peer.aesKeysIfSupported();
                             const peer_pub = peer.identity().publicKey();
-                            addressed_pkt.armor(peer_key[0..32], true, false, peer_aes, peer_pub);
+                            _ = peer_pub;
+                            _ = peer_aes;
+                            // Use only first 32 bytes of 48-byte key
+                            var key32: [32]u8 = undefined;
+                            @memcpy(&key32, peer_key[0..32]);
+
+                            // Debug: show key and packet info
+                            {
+                                var ubuf: [10]u8 = undefined;
+                                std.debug.print("  [WHOIS] To={s} Key[0..8]: {x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}\n", .{
+                                    upstream_addr.toString(&ubuf),
+                                    key32[0], key32[1], key32[2], key32[3],
+                                    key32[4], key32[5], key32[6], key32[7],
+                                });
+                                std.debug.print("  [WHOIS] Pkt size before armor: {d}\n", .{addressed_pkt.buf.size()});
+                            }
+                            addressed_pkt.armor(&key32, true, false, null, null);
 
                             var pi: u32 = 0;
                             while (pi < path_count) : (pi += 1) {
