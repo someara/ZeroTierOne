@@ -161,6 +161,10 @@ Trust boundaries in this project:
 5. **Wire protocols** — DNS packets, binary file formats, serialized
    data from disk or network. Every field must be validated; reserved
    values must be rejected, not ignored.
+6. **Zone-file text** — User-edited configuration files, zone data,
+   and text representations of records. Numeric fields can overflow,
+   strings can contain unexpected characters, and field counts may be
+   wrong. Validate with the same rigor as wire data.
 
 ### 4.2 Names and identifiers
 
@@ -207,7 +211,33 @@ When parsing untrusted binary data (network packets, file formats):
   valid values just because earlier fields were valid. Validate each
   field independently.
 
-### 4.6 Struct invariants
+### 4.6 Length-delimited record parsing
+
+When a binary format has a length prefix for a variable-length record
+(e.g., DNS RDLENGTH), the parser must enforce that exactly that many
+bytes are consumed. After parsing the record content, verify:
+
+    const consumed = reader.pos - start;
+    if (consumed != declared_length) return error.LengthMismatch;
+
+Without this check, a crafted length field desynchronizes the parser
+from the data stream, causing all subsequent records to parse from
+wrong offsets.
+
+### 4.7 Allocation from untrusted counts
+
+Never use a count field from untrusted data directly as an allocation
+size. Validate it against the actual data size first:
+
+    // BAD — attacker-controlled count drives allocation
+    const records = try allocator.alloc(Record, header.count);
+
+    // GOOD — cap against what the data can actually hold
+    const max_possible = data.len / min_record_size;
+    const count = @min(header.count, max_possible);
+    const records = try allocator.alloc(Record, count);
+
+### 4.8 Struct invariants
 
 When a struct's methods depend on internal data being well-formed
 (e.g., a buffer always containing valid wire-format data), document
@@ -455,6 +485,38 @@ For parsers, also add:
 - One test for malformed/adversarial input per field.
 - One round-trip test (parse → serialize → compare) when a writer
   exists.
+
+### 9.6 Mandatory audit after writing
+
+Every batch of new code must be followed by a bug-hunting audit
+before moving on. The audit checks the new code against every rule
+in this document and CODING_STANDARDS.md. Never skip the audit to
+"save time" — the bugs found in audit are cheaper to fix now than
+after they've been built upon.
+
+### 9.7 TDD for ported code
+
+When porting code from another implementation, convert the original
+test suite to Zig **before** writing the implementation. This gives
+you a specification to code against rather than bugs to find after:
+
+1. Extract concrete test vectors (inputs, expected outputs) from the
+   original test files.
+2. Write Zig tests that are initially expected to fail.
+3. Implement the code until all ported tests pass.
+4. Add additional tests for Zig-specific edge cases (e.g., allocator
+   failures, integer overflow) that the original language didn't need.
+
+This is more effective than write-then-audit because the original
+developers already found the tricky cases. Their tests encode domain
+knowledge about edge cases, RFC compliance, and real-world inputs
+that a fresh auditor would take multiple passes to rediscover.
+
+For wire protocols, port **both** directions: parse tests (does our
+reader produce the right struct from known bytes?) and write tests
+(does our writer produce the exact bytes the original implementation
+does?). Write-output tests catch encoding bugs like incorrect name
+compression that only manifest in the serialization direction.
 
 ---
 

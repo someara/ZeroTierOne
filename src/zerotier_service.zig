@@ -525,13 +525,14 @@ fn onPhyDatagram(
     const now = std.time.milliTimestamp();
     const local_sock: i64 = 0; // Use socket 0 as identifier
 
+    const pkt_len: u32 = std.math.cast(u32, data.len) orelse return;
     service.node.processWirePacket(
         null,
         now,
         local_sock,
         &from_zt,
         data.ptr,
-        @intCast(data.len),
+        pkt_len,
     );
 }
 
@@ -578,7 +579,7 @@ fn nodeStateObjectGet(
     if (bytes_read > 0) {
         std.debug.print("  → Loaded state object type {d} ({d} bytes) from {s}\n", .{ object_type, bytes_read, path });
     }
-    return @intCast(bytes_read);
+    return std.math.cast(i32, bytes_read) orelse return 0;
 }
 
 /// Node callback: Store state object

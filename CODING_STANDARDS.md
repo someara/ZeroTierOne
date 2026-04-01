@@ -515,3 +515,5 @@ When reviewing a change, check for:
 - [ ] `@truncate` only used for intentional data loss, not masked values
 - [ ] Wire-format setters with narrower bit widths document the constraint
 - [ ] Strings from external input (K8s API, user config) validated before use
+- [ ] Length-prefixed records verify exact byte count consumed after parsing
+- [ ] Allocation sizes derived from untrusted data are capped against actual data size
