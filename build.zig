@@ -78,6 +78,8 @@ pub fn build(b: *std.Build) void {
         // Phase 6: Packet Processing & Node
         "src/node/packet_multiplexer.zig",
         "src/node/incoming_packet.zig",
+        // Regression tests
+        "src/test_salsa20_keystream_regression.zig",
     };
 
     const test_step = b.step("test", "Run Zig module tests");
