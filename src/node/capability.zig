@@ -231,7 +231,7 @@ pub const Capability = struct {
         // Find the first empty slot in the custody chain
         for (0..@min(self._max_custody_chain_length, max_custody_chain_length)) |i| {
             if (!self._custody[i].to.isSet()) {
-                // Serialize for signing (before modifying the chain)
+                // Stack buffer — cannot OOM. Failure means capability exceeds max size.
                 var tmp: Buffer(max_serialized_size) = .{};
                 self.serializeForSign(&tmp) catch return false;
 
@@ -260,6 +260,7 @@ pub const Capability = struct {
         if (chain_index >= max_custody_chain_length) return false;
         if (!self._custody[chain_index].to.isSet()) return false;
 
+        // Stack buffer — cannot OOM. Failure means capability exceeds max size.
         var tmp: Buffer(max_serialized_size) = .{};
         self.serializeForSign(&tmp) catch return false;
         return signer_identity.verify(

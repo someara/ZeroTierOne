@@ -258,6 +258,8 @@ pub const Phy = struct {
         // Disable UDP checksums if requested (Linux-specific)
         if (self.no_check and builtin.os.tag == .linux) {
             const no_check: c_int = 1;
+            // SO_NO_CHECK is optional (not supported on all platforms).
+            // Failure is non-critical — UDP checksums remain enabled.
             _ = posix.setsockopt(
                 sock,
                 posix.SOL.SOCKET,
