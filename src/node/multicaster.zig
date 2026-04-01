@@ -407,7 +407,8 @@ pub const Multicaster = struct {
             }
         }
 
-        // Write back totalKnown and added.
+        // Write back totalKnown and added. These offsets were pre-calculated
+        // within the buffer's allocated size, so setAt cannot fail here.
         buf.setAt(u32, total_at, total_known) catch {};
         buf.setAt(u16, added_at, @as(u16, @intCast(added))) catch {};
 

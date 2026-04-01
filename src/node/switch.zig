@@ -788,7 +788,7 @@ pub const Switch = struct {
                     data[0..len],
                     path,
                     now,
-                ) catch return;
+                ) catch return; // Malformed packet data — drop silently
 
                 rq.frag0 = incoming;
                 rq.total_fragments = 0; // Will be set when we get other fragments
@@ -800,7 +800,7 @@ pub const Switch = struct {
                     data[0..len],
                     path,
                     now,
-                ) catch return;
+                ) catch return; // Malformed packet data — drop silently
 
                 rq.frag0 = incoming;
                 rq.have_fragments |= 1;
@@ -844,7 +844,7 @@ pub const Switch = struct {
                 data[0..len],
                 path,
                 now,
-            ) catch return;
+            ) catch return; // Malformed packet data — drop silently
 
             // Create IncomingPacket callbacks and try to decode
             const incoming_callbacks = callbacks.createIncomingPacketCallbacks(callbacks.ctx, t_ptr);

@@ -112,6 +112,7 @@ pub const Tag = struct {
         self._signed_by = signer.address();
 
         var tmp: Buffer(max_serialized_size) = .{};
+        // Stack buffer — cannot OOM. Failure means tag exceeds max size.
         self.serializeForSign(&tmp) catch return false;
 
         const sig = signer.sign(tmp.data()) orelse return false;
@@ -130,6 +131,7 @@ pub const Tag = struct {
     /// Returns true if the signature is valid.
     pub fn verifySignature(self: *const Tag, signer_identity: *const Identity) bool {
         var tmp: Buffer(max_serialized_size) = .{};
+        // Stack buffer — cannot OOM. Failure means tag exceeds max size.
         self.serializeForSign(&tmp) catch return false;
         return signer_identity.verify(tmp.data(), &self._signature);
     }
