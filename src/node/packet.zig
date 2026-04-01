@@ -501,7 +501,12 @@ pub const Packet = struct {
     pub fn cipher(self: *const Packet) CipherSuite {
         const b = self.buf.getByte(idx_flags) catch return .c25519_poly1305_none;
         const raw: u3 = @intCast((b >> 3) & 0x07);
-        return @enumFromInt(raw);
+        // Validate cipher suite is in defined range (0-3).
+        // Values 4-7 are reserved/undefined and must be rejected per STYLE.md §4.5.
+        return switch (raw) {
+            0...3 => @enumFromInt(raw),
+            else => .c25519_poly1305_none, // Treat unknown as none (will fail auth later)
+        };
     }
 
     pub fn isEncrypted(self: *const Packet) bool {
@@ -533,7 +538,8 @@ pub const Packet = struct {
 
     pub fn verb(self: *const Packet) Verb {
         const b = self.buf.getByte(idx_verb) catch return .nop;
-        return @enumFromInt(@as(u5, @truncate(b & 0x1f)));
+        // Masked to 5 bits, guaranteed to fit in u5 (use @intCast per CODING_STANDARDS.md Rule 16)
+        return @enumFromInt(@as(u5, @intCast(b & 0x1f)));
     }
 
     pub fn payloadLength(self: *const Packet) u32 {
@@ -566,7 +572,10 @@ pub const Packet = struct {
         out[18] = in_key[18] ^ (d[idx_flags] & 0xf8);
 
         // Packet size as little-endian u16.
+        // Note: ZeroTier protocol limits packets to 16-bit size (max 65535 bytes).
+        // Current max_packet_length (10024) is well under this limit.
         const sz = self.buf.size();
+        std.debug.assert(sz <= 0xFFFF); // Protocol constraint
         out[19] = in_key[19] ^ @as(u8, @truncate(sz & 0xff));
         out[20] = in_key[20] ^ @as(u8, @truncate((sz >> 8) & 0xff));
 
