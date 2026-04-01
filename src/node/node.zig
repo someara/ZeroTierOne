@@ -347,9 +347,14 @@ pub const Node = struct {
                         .planet_world_id = self.topology.planetWorldId(),
                         .planet_world_timestamp = self.topology.planetWorldTimestamp(),
                         .wireSendFn = self.callbacks.wireSend,
-                        .expectReplyFn = null, // Node calls expectReplyTo separately
+                        .expectReplyFn = struct {
+                            fn f(ctx: ?*anyopaque, packet_id: u64) void {
+                                const node: *Self = @ptrCast(@alignCast(ctx));
+                                node.expectReplyTo(packet_id);
+                            }
+                        }.f,
                         .wire_ctx = self.callbacks.ctx,
-                        .expect_ctx = null, // Not tracking expected replies here
+                        .expect_ctx = self,
                         .t_ptr = t_ptr,
                     };
 
