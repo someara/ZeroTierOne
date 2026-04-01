@@ -1596,14 +1596,16 @@ pub const Node = struct {
 
             // Frame / Network callbacks
             .networkMac = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque) MAC {
-                    return MAC.init(0); // TODO: Return network MAC address
+                fn f(_: ?*anyopaque, nw: ?*anyopaque) MAC {
+                    const network: *Network = @ptrCast(@alignCast(nw.?));
+                    return network._mac;
                 }
             }.f,
 
             .networkUserPtr = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque) ?*anyopaque {
-                    return null; // TODO: Return network user pointer
+                fn f(_: ?*anyopaque, nw: ?*anyopaque) ?*anyopaque {
+                    const network: *Network = @ptrCast(@alignCast(nw.?));
+                    return network._u_ptr;
                 }
             }.f,
 
