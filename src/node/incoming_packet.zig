@@ -686,7 +686,9 @@ pub const IncomingPacket = struct {
         path: ?*anyopaque,
         now: i64,
     ) !void {
-        self.pkt.buf.setSize(0) catch {};
+        self.pkt.buf.setSize(0) catch |err| {
+            std.log.warn("Failed to reset packet buffer size: {}", .{err});
+        };
         try self.pkt.buf.copyFrom(data);
         self.receive_time = now;
         self.path = path;
@@ -1416,7 +1418,9 @@ pub const IncomingPacket = struct {
                 var tmp_buf: [1024]u8 = undefined;
                 const planet_len = cb.topologySerializePlanet(cb.ctx, &tmp_buf, @intCast(tmp_buf.len));
                 if (planet_len > 0 and planet_len <= avail) {
-                    outp.buf.appendBytes(tmp_buf[0..planet_len]) catch {};
+                    outp.buf.appendBytes(tmp_buf[0..planet_len]) catch |err| {
+                        std.log.warn("Failed to append planet data to HELLO OK: {}", .{err});
+                    };
                     world_bytes_written += planet_len;
                 }
             }
@@ -1434,13 +1438,17 @@ pub const IncomingPacket = struct {
                 @intCast(tmp_buf.len),
             );
             if (moon_len > 0) {
-                outp.buf.appendBytes(tmp_buf[0..moon_len]) catch {};
+                outp.buf.appendBytes(tmp_buf[0..moon_len]) catch |err| {
+                    std.log.warn("Failed to append moon data to HELLO OK: {}", .{err});
+                };
                 world_bytes_written += moon_len;
             }
         }
 
         // Fill in the world update size field.
-        outp.buf.setAt(u16, world_update_size_at, @intCast(world_bytes_written)) catch {};
+        outp.buf.setAt(u16, world_update_size_at, @intCast(world_bytes_written)) catch |err| {
+            std.log.warn("Failed to set world update size in HELLO OK: {}", .{err});
+        };
 
         // Armor and send.
         const peer_key = cb.peerKey(cb.ctx, peer);
