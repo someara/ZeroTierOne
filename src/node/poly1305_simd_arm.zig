@@ -15,6 +15,56 @@ comptime {
     }
 }
 
+/// Helper function for adding with carry propagation (matches Zig stdlib)
+inline fn add(a: u64, b: u64, c: u1) struct { u64, u1 } {
+    const v1 = @addWithOverflow(a, b);
+    const v2 = @addWithOverflow(v1[0], c);
+    return .{ v2[0], v1[1] | v2[1] };
+}
+
+/// Process one Poly1305 block (h *= r mod 2^130-5)
+inline fn processBlock(h0: *u64, h1: *u64, h2: *u64, r0: u64, r1: u64) void {
+    // Multiply: h *= r (mod 2^130-5)
+    const m0: u128 = @as(u128, h0.*) * r0;
+    const h1r0: u128 = @as(u128, h1.*) * r0;
+    const h0r1: u128 = @as(u128, h0.*) * r1;
+    const h2r0: u128 = @as(u128, h2.*) * r0;
+    const h1r1: u128 = @as(u128, h1.*) * r1;
+    const m3: u128 = @as(u128, h2.*) * r1;
+    const m1: u128 = h1r0 +% h0r1;
+    const m2: u128 = h2r0 +% h1r1;
+
+    // Carry propagation
+    const t0: u64 = @truncate(m0);
+    var v = @addWithOverflow(@as(u64, @truncate(m1)), @as(u64, @truncate(m0 >> 64)));
+    const t1: u64 = v[0];
+    v = add(@as(u64, @truncate(m2)), @as(u64, @truncate(m1 >> 64)), v[1]);
+    const t2: u64 = v[0];
+    v = add(@as(u64, @truncate(m3)), @as(u64, @truncate(m2 >> 64)), v[1]);
+    const t3: u64 = v[0];
+
+    // Partial reduction
+    h0.* = t0;
+    h1.* = t1;
+    h2.* = t2 & 3;
+
+    // Add c*(4+1) where c is the overflow
+    const cclo = t2 & ~@as(u64, 3);
+    const cchi = t3;
+    v = @addWithOverflow(h0.*, cclo);
+    h0.* = v[0];
+    v = add(h1.*, cchi, v[1]);
+    h1.* = v[0];
+    h2.* +%= v[1];
+
+    const cc = (cclo | (@as(u128, cchi) << 64)) >> 2;
+    v = @addWithOverflow(h0.*, @as(u64, @truncate(cc)));
+    h0.* = v[0];
+    v = add(h1.*, @as(u64, @truncate(cc >> 64)), v[1]);
+    h1.* = v[0];
+    h2.* +%= v[1];
+}
+
 /// Optimized Poly1305 computation for ARM64
 ///
 /// Uses 64-bit limb representation with efficient carry handling.
@@ -32,56 +82,57 @@ pub fn compute(
     const r0 = std.mem.readInt(u64, key[0..8], .little) & 0x0ffffffc0fffffff;
     const r1 = std.mem.readInt(u64, key[8..16], .little) & 0x0ffffffc0ffffffc;
 
-    // Precompute r * 5 for multiplication optimization
-    const r1_5 = r1 * 5;
-
     var remaining = msg;
 
-    // Process 16-byte blocks
+    // Process 16-byte blocks (disable safety checks for performance)
+    @setRuntimeSafety(false);
     while (remaining.len >= 16) {
-        // Read block as two 64-bit limbs
-        const m0 = std.mem.readInt(u64, remaining[0..8], .little);
-        const m1 = std.mem.readInt(u64, remaining[8..16], .little);
+        const in0 = std.mem.readInt(u64, remaining[0..8], .little);
+        const in1 = std.mem.readInt(u64, remaining[8..16], .little);
 
-        // Add message block to accumulator
-        // h = (h + m) with 2^128 bit set
-        const s0 = @addWithOverflow(h0, m0);
-        h0 = s0[0];
-        const c0: u64 = s0[1];
+        // Add message block
+        const vadd = @addWithOverflow(h0, in0);
+        h0 = vadd[0];
+        const vadd1 = @addWithOverflow(h1, in1);
+        const vadd2 = @addWithOverflow(vadd1[0], vadd[1]);
+        h1 = vadd2[0];
+        h2 +%= @as(u64, vadd1[1] | vadd2[1]) +% 1;
 
-        const s1 = @addWithOverflow(h1, m1);
-        h1 = s1[0];
-        const c1: u64 = s1[1];
-
-        h1 +%= c0;
-        h2 +%= c1 + @intFromBool(h1 < c0) + (1 << 24); // Add 2^128 bit
-
-        // Multiply: h *= r (mod 2^130-5)
-        // Using 64-bit limbs, this requires careful handling
-        const d0_init: u128 = @as(u128, h0) * r0;
-        const d1_init: u128 = @as(u128, h0) * r1 + @as(u128, h1) * r0;
-        const d2_init: u128 = @as(u128, h1) * r1 + @as(u128, h2) * r1_5 + @as(u128, h2) * r0;
+        // Multiply h *= r (inlined for performance)
+        const m0: u128 = @as(u128, h0) * r0;
+        const m1: u128 = @as(u128, h1) * r0 +% @as(u128, h0) * r1;
+        const m2: u128 = @as(u128, h2) * r0 +% @as(u128, h1) * r1;
+        const m3: u128 = @as(u128, h2) * r1;
 
         // Carry propagation
-        const c_d0: u64 = @truncate(d0_init >> 64);
-        const d1_mid: u128 = d1_init + c_d0;
+        const t0: u64 = @truncate(m0);
+        var v = @addWithOverflow(@as(u64, @truncate(m1)), @as(u64, @truncate(m0 >> 64)));
+        const t1: u64 = v[0];
+        v = add(@as(u64, @truncate(m2)), @as(u64, @truncate(m1 >> 64)), v[1]);
+        const t2: u64 = v[0];
+        v = add(@as(u64, @truncate(m3)), @as(u64, @truncate(m2 >> 64)), v[1]);
+        const t3: u64 = v[0];
 
-        const c_d1: u64 = @truncate(d1_mid >> 64);
-        const d2: u128 = d2_init + c_d1;
-        const d0: u128 = d0_init;
-        const d1: u128 = d1_mid;
+        // Partial reduction
+        h0 = t0;
+        h1 = t1;
+        h2 = t2 & 3;
 
-        // Reduce mod 2^130-5
-        // h2 can be at most 3 bits (130 - 64 - 64 = 2 bits + carry)
-        h0 = @truncate(d0);
-        h1 = @truncate(d1);
-        h2 = @truncate(d2);
+        // Reduce overflow
+        const cclo = t2 & ~@as(u64, 3);
+        const cchi = t3;
+        v = @addWithOverflow(h0, cclo);
+        h0 = v[0];
+        v = add(h1, cchi, v[1]);
+        h1 = v[0];
+        h2 +%= v[1];
 
-        // Final reduction: if h >= 2^130-5, subtract 2^130-5
-        const c2: u64 = @truncate(h2 >> 2);
-        h2 &= 3;
-        h0 +%= c2 * 5;
-        if (h0 < c2 * 5) h1 +%= 1;
+        const cc = (cclo | (@as(u128, cchi) << 64)) >> 2;
+        v = @addWithOverflow(h0, @as(u64, @truncate(cc)));
+        h0 = v[0];
+        v = add(h1, @as(u64, @truncate(cc >> 64)), v[1]);
+        h1 = v[0];
+        h2 +%= v[1];
 
         remaining = remaining[16..];
     }
@@ -92,63 +143,46 @@ pub fn compute(
         @memcpy(final_block[0..remaining.len], remaining);
         final_block[remaining.len] = 1; // Pad with 0x01
 
-        const m0 = std.mem.readInt(u64, final_block[0..8], .little);
-        const m1 = std.mem.readInt(u64, final_block[8..16], .little);
+        const in0_p = std.mem.readInt(u64, final_block[0..8], .little);
+        const in1_p = std.mem.readInt(u64, final_block[8..16], .little);
 
-        const s0 = @addWithOverflow(h0, m0);
-        h0 = s0[0];
-        const c0: u64 = s0[1];
+        const vadd_p = @addWithOverflow(h0, in0_p);
+        h0 = vadd_p[0];
+        const vadd1_p = @addWithOverflow(h1, in1_p);
+        const vadd2_p = @addWithOverflow(vadd1_p[0], vadd_p[1]);
+        h1 = vadd2_p[0];
+        h2 +%= @as(u64, vadd1_p[1] | vadd2_p[1]); // No hibit for final block
 
-        const s1 = @addWithOverflow(h1, m1);
-        h1 = s1[0];
-        const c1: u64 = s1[1];
-
-        h1 +%= c0;
-        h2 +%= c1 + @intFromBool(h1 < c0);
-
-        // Multiply: h *= r
-        const d0_init2: u128 = @as(u128, h0) * r0;
-        const d1_init2: u128 = @as(u128, h0) * r1 + @as(u128, h1) * r0;
-        const d2_init2: u128 = @as(u128, h1) * r1 + @as(u128, h2) * r1_5 + @as(u128, h2) * r0;
-
-        const c_d0_2: u64 = @truncate(d0_init2 >> 64);
-        const d1_mid2: u128 = d1_init2 + c_d0_2;
-
-        const c_d1_2: u64 = @truncate(d1_mid2 >> 64);
-        const d2: u128 = d2_init2 + c_d1_2;
-        const d0: u128 = d0_init2;
-        const d1: u128 = d1_mid2;
-
-        h0 = @truncate(d0);
-        h1 = @truncate(d1);
-        h2 = @truncate(d2);
-
-        const c2: u64 = @truncate(h2 >> 2);
-        h2 &= 3;
-        h0 +%= c2 * 5;
-        if (h0 < c2 * 5) h1 +%= 1;
+        processBlock(&h0, &h1, &h2, r0, r1);
     }
 
-    // Final reduction: fully reduce h mod 2^130-5
-    // Add 5 and check for overflow to determine if h >= 2^130-5
-    const g0_init = h0 +% 5;
-    const g1_init = h1 +% @intFromBool(g0_init < 5);
-    const g2_init = h2 +% @intFromBool(g1_init < h1);
+    // Final reduction: H - (2^130 - 5) if H >= 2^130-5 (matches stdlib)
+    var vfinal = @subWithOverflow(h0, 0xfffffffffffffffb);
+    const h_p0 = vfinal[0];
+    const sub_helper = struct {
+        inline fn sub(a: u64, b: u64, c: u1) struct { u64, u1 } {
+            const v1 = @subWithOverflow(a, b);
+            const v2 = @subWithOverflow(v1[0], c);
+            return .{ v2[0], v1[1] | v2[1] };
+        }
+    };
+    vfinal = sub_helper.sub(h1, 0xffffffffffffffff, vfinal[1]);
+    const h_p1 = vfinal[0];
+    vfinal = sub_helper.sub(h2, 0x0000000000000003, vfinal[1]);
 
-    // If g2 >= 4, then h >= 2^130-5, so use g
-    const mask = @as(u64, 0) -% (g2_init >> 2);
-    const g0_xor = (g0_init ^ h0) & mask;
-    const g1_xor = (g1_init ^ h1) & mask;
-    h0 ^= g0_xor;
-    h1 ^= g1_xor;
+    // If no borrow, use reduced value
+    const mask_final = @as(u64, vfinal[1]) -% 1;
+    h0 ^= mask_final & (h0 ^ h_p0);
+    h1 ^= mask_final & (h1 ^ h_p1);
 
-    // Add pad (second half of key)
+    // Add pad (second half of key) with proper carry
     const pad0 = std.mem.readInt(u64, key[16..24], .little);
     const pad1 = std.mem.readInt(u64, key[24..32], .little);
 
-    const f0 = @addWithOverflow(h0, pad0);
-    h0 = f0[0];
-    h1 +%= pad1 +% f0[1];
+    const h0_padded = h0 +% pad0;
+    const carry_bit = ((h0 & pad0) | ((h0 | pad0) & ~h0_padded)) >> 63;
+    h0 = h0_padded;
+    h1 = h1 +% pad1 +% carry_bit;
 
     // Write result
     std.mem.writeInt(u64, out[0..8], h0, .little);
@@ -162,7 +196,6 @@ pub const Context = struct {
     h2: u64,
     r0: u64,
     r1: u64,
-    r1_5: u64,
     pad0: u64,
     pad1: u64,
     buffer: [16]u8,
@@ -178,7 +211,6 @@ pub const Context = struct {
             .h2 = 0,
             .r0 = r0,
             .r1 = r1,
-            .r1_5 = r1 * 5,
             .pad0 = std.mem.readInt(u64, key[16..24], .little),
             .pad1 = std.mem.readInt(u64, key[24..32], .little),
             .buffer = undefined,
@@ -246,42 +278,53 @@ pub const Context = struct {
     }
 
     inline fn processBlock(self: *Context, block: *const [16]u8, add_hibit: bool) void {
-        const m0 = std.mem.readInt(u64, block[0..8], .little);
-        const m1 = std.mem.readInt(u64, block[8..16], .little);
+        const in0_b = std.mem.readInt(u64, block[0..8], .little);
+        const in1_b = std.mem.readInt(u64, block[8..16], .little);
 
         // Add block to accumulator
-        const s0 = @addWithOverflow(self.h0, m0);
-        self.h0 = s0[0];
-        const c0: u64 = s0[1];
+        const vadd_b = @addWithOverflow(self.h0, in0_b);
+        self.h0 = vadd_b[0];
+        const vadd1_b = @addWithOverflow(self.h1, in1_b);
+        const vadd2_b = @addWithOverflow(vadd1_b[0], vadd_b[1]);
+        self.h1 = vadd2_b[0];
+        const hibit: u64 = if (add_hibit) 1 else 0; // 2^128 bit
+        self.h2 +%= @as(u64, vadd1_b[1] | vadd2_b[1]) +% hibit;
 
-        const s1 = @addWithOverflow(self.h1, m1);
-        self.h1 = s1[0];
-        const c1: u64 = s1[1];
+        // Multiply: h *= r (same algorithm as one-shot compute)
+        const m0_ctx: u128 = @as(u128, self.h0) * self.r0;
+        const h1r0_ctx: u128 = @as(u128, self.h1) * self.r0;
+        const h0r1_ctx: u128 = @as(u128, self.h0) * self.r1;
+        const h2r0_ctx: u128 = @as(u128, self.h2) * self.r0;
+        const h1r1_ctx: u128 = @as(u128, self.h1) * self.r1;
+        const m3_ctx: u128 = @as(u128, self.h2) * self.r1;
+        const m1_ctx: u128 = h1r0_ctx +% h0r1_ctx;
+        const m2_ctx: u128 = h2r0_ctx +% h1r1_ctx;
 
-        self.h1 +%= c0;
-        const hibit: u64 = if (add_hibit) (1 << 24) else 0;
-        self.h2 +%= c1 + @intFromBool(self.h1 < c0) + hibit;
+        const t0_ctx: u64 = @truncate(m0_ctx);
+        var vctx = @addWithOverflow(@as(u64, @truncate(m1_ctx)), @as(u64, @truncate(m0_ctx >> 64)));
+        const t1_ctx: u64 = vctx[0];
+        vctx = add(@as(u64, @truncate(m2_ctx)), @as(u64, @truncate(m1_ctx >> 64)), vctx[1]);
+        const t2_ctx: u64 = vctx[0];
+        vctx = add(@as(u64, @truncate(m3_ctx)), @as(u64, @truncate(m2_ctx >> 64)), vctx[1]);
+        const t3_ctx: u64 = vctx[0];
 
-        // Multiply: h *= r
-        const d0_ctx: u128 = @as(u128, self.h0) * self.r0;
-        const d1_ctx_init: u128 = @as(u128, self.h0) * self.r1 + @as(u128, self.h1) * self.r0;
-        const d2_ctx_init: u128 = @as(u128, self.h1) * self.r1 + @as(u128, self.h2) * self.r1_5 + @as(u128, self.h2) * self.r0;
+        self.h0 = t0_ctx;
+        self.h1 = t1_ctx;
+        self.h2 = t2_ctx & 3;
 
-        // Carry propagation
-        const c_d0_ctx: u64 = @truncate(d0_ctx >> 64);
-        const d1_ctx: u128 = d1_ctx_init + c_d0_ctx;
+        const cclo_ctx = t2_ctx & ~@as(u64, 3);
+        const cchi_ctx = t3_ctx;
+        vctx = @addWithOverflow(self.h0, cclo_ctx);
+        self.h0 = vctx[0];
+        vctx = add(self.h1, cchi_ctx, vctx[1]);
+        self.h1 = vctx[0];
+        self.h2 +%= vctx[1];
 
-        const c_d1_ctx: u64 = @truncate(d1_ctx >> 64);
-        const d2_ctx: u128 = d2_ctx_init + c_d1_ctx;
-
-        self.h0 = @truncate(d0_ctx);
-        self.h1 = @truncate(d1_ctx);
-        self.h2 = @truncate(d2_ctx);
-
-        // Reduce
-        const c2: u64 = @truncate(self.h2 >> 2);
-        self.h2 &= 3;
-        self.h0 +%= c2 * 5;
-        if (self.h0 < c2 * 5) self.h1 +%= 1;
+        const cc_ctx = (cclo_ctx | (@as(u128, cchi_ctx) << 64)) >> 2;
+        vctx = @addWithOverflow(self.h0, @as(u64, @truncate(cc_ctx)));
+        self.h0 = vctx[0];
+        vctx = add(self.h1, @as(u64, @truncate(cc_ctx >> 64)), vctx[1]);
+        self.h1 = vctx[0];
+        self.h2 +%= vctx[1];
     }
 };
