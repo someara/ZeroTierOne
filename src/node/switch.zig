@@ -1225,6 +1225,53 @@ test "Switch: computeFlowId unknown protocol" {
     try testing.expectEqual(qos_no_flow, flow_id);
 }
 
+test "Switch: computeFlowId IPv4 IHL < 5 returns no_flow" {
+    // IHL=1 (4 bytes) is invalid — minimum is 5 (20 bytes)
+    var data: [40]u8 = undefined;
+    @memset(&data, 0);
+    data[0] = 0x41; // IPv4, IHL=1 (4 bytes, invalid)
+    data[9] = 0x06; // TCP
+
+    try testing.expectEqual(qos_no_flow, Switch.computeFlowId(ethertype_ipv4, &data));
+
+    // IHL=0 is also invalid
+    data[0] = 0x40;
+    try testing.expectEqual(qos_no_flow, Switch.computeFlowId(ethertype_ipv4, &data));
+}
+
+test "Switch: computeFlowId IPv4 header extends past packet" {
+    // IHL=15 (60 bytes) but packet is only 40 bytes — no room for ports
+    var data: [40]u8 = undefined;
+    @memset(&data, 0);
+    data[0] = 0x4F; // IPv4, IHL=15 (60-byte header)
+    data[9] = 0x06; // TCP
+
+    // header_len=60, need 64 bytes for ports — 40 byte packet too small
+    try testing.expectEqual(qos_no_flow, Switch.computeFlowId(ethertype_ipv4, &data));
+}
+
+test "Switch: computeFlowId IPv6 extension header overflow" {
+    // IPv6 with extension header claiming huge length
+    var data: [60]u8 = undefined;
+    @memset(&data, 0);
+    data[6] = 0; // Next header = Hop-by-Hop Options (extension)
+    data[40] = 0x06; // Next proto = TCP (after extension)
+    data[41] = 0xFF; // Extension length = 255*8+8 = 2048 bytes (way past buffer)
+
+    // Should not crash, should return no_flow (can't reach ports)
+    const flow_id = Switch.computeFlowId(ethertype_ipv6, &data);
+    try testing.expectEqual(qos_no_flow, flow_id);
+}
+
+test "Switch: computeFlowId short IPv4 packet" {
+    // Only 19 bytes — below minimum 20 for IPv4
+    var data: [19]u8 = undefined;
+    @memset(&data, 0);
+    data[0] = 0x45;
+
+    try testing.expectEqual(qos_no_flow, Switch.computeFlowId(ethertype_ipv4, &data));
+}
+
 test "Switch: findRXQueueEntry" {
     var sw = try Switch.init(testing.allocator);
     defer sw.deinit();

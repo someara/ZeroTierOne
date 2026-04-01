@@ -1655,3 +1655,28 @@ test "Topology: moons with no moons" {
     const count = topo.moons(&m);
     try testing.expectEqual(@as(u32, 0), count);
 }
+
+test "Topology: getRootsToContact returns empty when no planet" {
+    var my_id = try Identity.generate(testing.allocator);
+    defer my_id.deinit();
+    const topo = try createTestTopology(&my_id);
+    defer destroyTestTopology(topo);
+
+    var contacts: [8]Topology.RootContact = undefined;
+    const count = topo.getRootsToContact(&contacts);
+    try testing.expectEqual(@as(u32, 0), count);
+}
+
+test "Topology: _findPeerLocked returns null for unknown address" {
+    var my_id = try Identity.generate(testing.allocator);
+    defer my_id.deinit();
+    const topo = try createTestTopology(&my_id);
+    defer destroyTestTopology(topo);
+
+    // Must hold lock to call _findPeerLocked
+    topo._peers_m.lock();
+    defer topo._peers_m.unlock();
+
+    const result = topo._findPeerLocked(Address.init(0xDEADBEEF0));
+    try testing.expect(result == null);
+}

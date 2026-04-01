@@ -1547,3 +1547,83 @@ test "Peer: setCallbacks" {
     try testing.expect(peer._learned_new_path_fn != null);
     try testing.expect(peer._cb_ctx != null);
 }
+
+test "Peer: sendHELLO constructs valid packet" {
+    var id_a = try Identity.generate(testing.allocator);
+    var id_b = try Identity.generate(testing.allocator);
+    defer id_a.deinit();
+    defer id_b.deinit();
+
+    var peer = Peer.create(&id_a, &id_b) orelse return error.SkipZigTest;
+    defer peer.deinit();
+
+    // Capture what sendHELLO sends
+    const Capture = struct {
+        var captured_data: [2048]u8 = undefined;
+        var captured_len: u32 = 0;
+        var send_count: u32 = 0;
+
+        fn wireSend(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, data: [*]const u8, len: u32, _: i32) void {
+            if (len <= 2048) {
+                @memcpy(captured_data[0..len], data[0..len]);
+                captured_len = len;
+            }
+            send_count += 1;
+        }
+    };
+
+    Capture.send_count = 0;
+    Capture.captured_len = 0;
+
+    const dest = InetAddress.initV4(.{ 198, 41, 200, 2 }, 9993);
+    const ctx = Peer.HelloContext{
+        .my_identity = &id_a,
+        .planet_world_id = 149604618, // Earth
+        .planet_world_timestamp = 1000,
+        .wireSendFn = &Capture.wireSend,
+        .wire_ctx = null,
+        .t_ptr = null,
+    };
+
+    peer.sendHELLO(&dest, 0, 12345, &ctx);
+
+    // Verify packet was sent
+    try testing.expectEqual(@as(u32, 1), Capture.send_count);
+    try testing.expect(Capture.captured_len > 0);
+
+    // Verify it's a valid packet with HELLO verb
+    const Packet = pkt.Packet;
+    var hello_pkt = Packet{ .buf = .{} };
+    hello_pkt.buf.setSize(Capture.captured_len) catch unreachable;
+    @memcpy(hello_pkt.buf.dataMut()[0..Capture.captured_len], Capture.captured_data[0..Capture.captured_len]);
+
+    // Destination should be peer's address (id_b)
+    try testing.expect(hello_pkt.destination().eql(id_b.address()));
+    // Source should be our address (id_a)
+    try testing.expect(hello_pkt.source().eql(id_a.address()));
+
+    // Cipher should be c25519_poly1305_none (MAC only, no encryption)
+    try testing.expectEqual(pkt.CipherSuite.c25519_poly1305_none, hello_pkt.cipher());
+
+    // Should be able to dearmor with the shared key
+    var key32: [32]u8 = undefined;
+    @memcpy(&key32, peer.key()[0..32]);
+    try testing.expect(hello_pkt.dearmor(&key32, null, null));
+
+    // After dearmor, verb should be HELLO
+    try testing.expectEqual(pkt.Verb.hello, hello_pkt.verb());
+}
+
+test "Peer: sendHELLO with doPingAndKeepalive" {
+    var id_a = try Identity.generate(testing.allocator);
+    var id_b = try Identity.generate(testing.allocator);
+    defer id_a.deinit();
+    defer id_b.deinit();
+
+    var peer = Peer.create(&id_a, &id_b) orelse return error.SkipZigTest;
+    defer peer.deinit();
+
+    // Without hello_ctx, should still work (no send, just maintenance)
+    const sent = peer.doPingAndKeepalive(1000, null);
+    try testing.expectEqual(@as(u32, 0), sent); // No paths, nothing sent
+}
