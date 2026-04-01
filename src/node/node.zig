@@ -95,6 +95,12 @@ pub const Node = struct {
     // PRNG state for generating random values
     prng_state: u64,
 
+    // Expected reply tracking (mirrors C++ _expectingRepliesTo)
+    // 256 buckets × 32 entries = 8192 tracked packet IDs.
+    // Indexed by upper 32 bits of packet ID, hashed into bucket.
+    expecting_replies: [256][32]u32,
+    expecting_replies_ptr: [256]u8,
+
     const Self = @This();
 
     /// Create a new Node instance.
@@ -144,6 +150,8 @@ pub const Node = struct {
             .user_ptr = user_ptr,
             .callbacks = callbacks,
             .prng_state = @as(u64, @bitCast(now)) ^ identity.address().toInt(),
+            .expecting_replies = [_][32]u32{[_]u32{0} ** 32} ** 256,
+            .expecting_replies_ptr = [_]u8{0} ** 256,
         };
 
         // Post UP event
@@ -336,6 +344,7 @@ pub const Node = struct {
                         .planet_world_id = self.topology.planetWorldId(),
                         .planet_world_timestamp = self.topology.planetWorldTimestamp(),
                         .wireSendFn = self.callbacks.wireSend,
+                        .expectReplyFn = null, // Node calls expectReplyTo separately
                         .wire_ctx = self.callbacks.ctx,
                         .t_ptr = t_ptr,
                     };
@@ -406,6 +415,31 @@ pub const Node = struct {
         );
 
         return @min(next_task_deadline, switch_deadline);
+    }
+
+    // ── Expected Reply Tracking ─────────────────────────────────
+    // Mirrors C++ Node::expectReplyTo / Node::expectingReplyTo.
+    // Uses upper 32 bits of packet ID as key into a 256×32 hash table.
+
+    /// Record that we expect an OK reply for the given packet ID.
+    pub fn expectReplyTo(self: *Self, packet_id: u64) void {
+        const pid2: u32 = @truncate(packet_id >> 32);
+        const bucket: u8 = @truncate(pid2);
+        const slot = self.expecting_replies_ptr[bucket];
+        self.expecting_replies[bucket][slot & 31] = pid2;
+        self.expecting_replies_ptr[bucket] = slot +% 1;
+    }
+
+    /// Check if we are expecting an OK for the given packet ID.
+    pub fn isExpectingReplyTo(self: *const Self, packet_id: u64) bool {
+        const pid2: u32 = @truncate(packet_id >> 32);
+        const bucket: u8 = @truncate(pid2);
+        for (0..32) |i| {
+            if (self.expecting_replies[bucket][i] == pid2) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Get a network by ID.
@@ -1424,8 +1458,9 @@ pub const Node = struct {
             }.f,
 
             .nodeExpectingReplyTo = struct {
-                fn f(_: ?*anyopaque, _: u64) bool {
-                    return false; // TODO: Check if expecting reply
+                fn f(ctx: ?*anyopaque, packet_id: u64) bool {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return node.isExpectingReplyTo(packet_id);
                 }
             }.f,
 
@@ -1472,14 +1507,11 @@ pub const Node = struct {
             }.f,
 
             .networkHandleConfigChunk = struct {
-                fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, _: ?*anyopaque, packet_id: u64, nwid: u64, chunk_data: [*]const u8, chunk_len: u32, start_ptr: u32) void {
-                    const node: *Self = @ptrCast(@alignCast(ctx.?));
-                    _ = tptr;
-                    const network = node.getNetwork(nwid) orelse return;
+                fn f(_: ?*anyopaque, tptr: ?*anyopaque, network_ptr: ?*anyopaque, packet_id: u64, source_addr: u64, chunk_data: [*]const u8, chunk_offset: u32, chunk_len: u32) void {
+                    const network: *Network = @ptrCast(@alignCast(network_ptr orelse return));
                     const data = chunk_data[0..chunk_len];
-                    // Extract controller address from network ID (upper 40 bits)
-                    const controller_addr = Address.init(nwid >> 24);
-                    _ = network.handleConfigChunk(null, packet_id, controller_addr, data, start_ptr);
+                    const controller = Address.init(source_addr);
+                    _ = network.handleConfigChunk(tptr, packet_id, controller, data, chunk_offset);
                 }
             }.f,
 
@@ -1602,8 +1634,11 @@ pub const Node = struct {
             }.f,
 
             .networkHandleConfig = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: [*]const u8, _: u32) void {
-                    // TODO: Handle network config (client side)
+                fn f(_: ?*anyopaque, tptr: ?*anyopaque, network_ptr: ?*anyopaque, packet_id: u64, from_addr: u64, chunk_data: [*]const u8, chunk_len: u32) void {
+                    const network: *Network = @ptrCast(@alignCast(network_ptr orelse return));
+                    const data = chunk_data[0..chunk_len];
+                    const controller = Address.init(from_addr);
+                    _ = network.handleConfigChunk(tptr, packet_id, controller, data, 0);
                 }
             }.f,
 
@@ -2054,4 +2089,94 @@ test "Node: belongsToNetwork" {
 
     // Should not belong anymore
     try testing.expect(!node.belongsToNetwork(nwid));
+}
+
+test "Node: expectReplyTo and isExpectingReplyTo" {
+    const callbacks = Callbacks{
+        .ctx = null,
+        .stateObjectGet = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]u8, _: u32) i32 { return 0; }
+        }.f,
+        .stateObjectPut = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}
+        }.f,
+        .stateObjectDelete = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64) void {}
+        }.f,
+        .wireSend = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: [*]const u8, _: u32, _: i32) void {}
+        }.f,
+        .frameInject = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u64, _: u32, _: u32, _: [*]const u8, _: u32) void {}
+        }.f,
+        .event = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: ?*const anyopaque) void {}
+        }.f,
+    };
+    var node = try Node.init(testing.allocator, null, null, &Config{}, callbacks, 1000);
+    defer node.deinit();
+
+    const pkt_id: u64 = 0xDEADBEEF_12345678;
+
+    // Not expecting anything initially
+    try testing.expect(!node.isExpectingReplyTo(pkt_id));
+
+    // Record expectation
+    node.expectReplyTo(pkt_id);
+
+    // Now expecting it
+    try testing.expect(node.isExpectingReplyTo(pkt_id));
+
+    // Different packet ID with different upper bits — not expected
+    const other_id: u64 = 0xCAFEBABE_12345678;
+    try testing.expect(!node.isExpectingReplyTo(other_id));
+
+    // Record the second one
+    node.expectReplyTo(other_id);
+    try testing.expect(node.isExpectingReplyTo(other_id));
+    // First still expected (ring buffer has 32 slots per bucket)
+    try testing.expect(node.isExpectingReplyTo(pkt_id));
+}
+
+test "Node: expectReplyTo wraps ring buffer" {
+    const callbacks = Callbacks{
+        .ctx = null,
+        .stateObjectGet = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]u8, _: u32) i32 { return 0; }
+        }.f,
+        .stateObjectPut = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}
+        }.f,
+        .stateObjectDelete = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64) void {}
+        }.f,
+        .wireSend = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: [*]const u8, _: u32, _: i32) void {}
+        }.f,
+        .frameInject = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u64, _: u32, _: u32, _: [*]const u8, _: u32) void {}
+        }.f,
+        .event = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: ?*const anyopaque) void {}
+        }.f,
+    };
+    var node = try Node.init(testing.allocator, null, null, &Config{}, callbacks, 1000);
+    defer node.deinit();
+
+    // Fill one bucket with 33 entries (32-slot ring buffer + 1 overflow).
+    // All have same lower 8 bits of upper-32 → same bucket (0x42).
+    const base: u64 = 0x00000042_00000000;
+    var i: u32 = 0;
+    while (i < 33) : (i += 1) {
+        const pkt_id = base | (@as(u64, i) << 40);
+        node.expectReplyTo(pkt_id);
+    }
+
+    // The 33rd entry overwrote the 1st (ring wraps at 32)
+    const first_id = base | (@as(u64, 0) << 40);
+    try testing.expect(!node.isExpectingReplyTo(first_id));
+
+    // The 33rd entry is still present
+    const last_id = base | (@as(u64, 32) << 40);
+    try testing.expect(node.isExpectingReplyTo(last_id));
 }

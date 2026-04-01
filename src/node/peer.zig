@@ -1009,6 +1009,7 @@ pub const Peer = struct {
         planet_world_id: u64,
         planet_world_timestamp: u64,
         wireSendFn: *const fn (?*anyopaque, ?*anyopaque, i64, *const InetAddress, [*]const u8, u32, i32) void,
+        expectReplyFn: ?*const fn (?*anyopaque, u64) void,
         wire_ctx: ?*anyopaque,
         t_ptr: ?*anyopaque,
     };
@@ -1048,6 +1049,11 @@ pub const Peer = struct {
 
         // Armor with MAC only (encrypt=false), matching C++ armor(_key, false, ...)
         outp.armor(&self._key[0..32].*, false, false, null, null);
+
+        // Track expected reply
+        if (ctx.expectReplyFn) |expectFn| {
+            expectFn(ctx.wire_ctx, outp.packetId());
+        }
 
         // Send
         const pkt_data = outp.buf.data();
@@ -1581,6 +1587,7 @@ test "Peer: sendHELLO constructs valid packet" {
         .planet_world_id = 149604618, // Earth
         .planet_world_timestamp = 1000,
         .wireSendFn = &Capture.wireSend,
+        .expectReplyFn = null,
         .wire_ctx = null,
         .t_ptr = null,
     };
