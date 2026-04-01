@@ -616,28 +616,54 @@ pub const Switch = struct {
         }
 
         // Clean up old WHOIS requests
-        // TODO: Implement hashtable.remove() method
         {
             self.last_sent_whois_request_mutex.lock();
             defer self.last_sent_whois_request_mutex.unlock();
-            // var whois_iter = self.last_sent_whois_request.iterator();
-            // while (whois_iter.next()) |entry| {
-            //     if ((now - entry.value_ptr.*) > (constants.whois_retry_delay * 2)) {
-            //         _ = self.last_sent_whois_request.remove(entry.key_ptr.*);
-            //     }
-            // }
+
+            // Collect stale keys (cannot modify during iteration per CODING_STANDARDS.md Rule 7)
+            var stale_whois: [128]Address = undefined;
+            var stale_count: usize = 0;
+
+            var whois_iter = self.last_sent_whois_request.iterator();
+            while (whois_iter.next()) |entry| {
+                if ((now - entry.value_ptr.*) > (constants.whois_retry_delay * 2)) {
+                    if (stale_count < stale_whois.len) {
+                        stale_whois[stale_count] = entry.key_ptr.*;
+                        stale_count += 1;
+                    }
+                }
+            }
+
+            // Remove stale entries after iteration
+            for (stale_whois[0..stale_count]) |addr| {
+                _ = self.last_sent_whois_request.erase(addr);
+            }
         }
 
         // Clean up old UNITE attempts
-        self.last_unite_attempt_mutex.lock();
-        var unite_iter = self.last_unite_attempt.iterator();
-        while (unite_iter.next()) |entry| {
-            if ((now - @as(i64, @intCast(entry.value_ptr.*))) >= (constants.min_unite_interval * 8)) {
-                // TODO: Implement hashtable.remove()
-                // _ = self.last_unite_attempt.remove(entry.key_ptr.*);
+        {
+            self.last_unite_attempt_mutex.lock();
+            defer self.last_unite_attempt_mutex.unlock();
+
+            // Collect stale keys (cannot modify during iteration)
+            var stale_unite: [128]LastUniteKey = undefined;
+            var stale_count: usize = 0;
+
+            var unite_iter = self.last_unite_attempt.iterator();
+            while (unite_iter.next()) |entry| {
+                if ((now - @as(i64, @intCast(entry.value_ptr.*))) >= (constants.min_unite_interval * 8)) {
+                    if (stale_count < stale_unite.len) {
+                        stale_unite[stale_count] = entry.key_ptr.*;
+                        stale_count += 1;
+                    }
+                }
+            }
+
+            // Remove stale entries after iteration
+            for (stale_unite[0..stale_count]) |key| {
+                _ = self.last_unite_attempt.erase(key);
             }
         }
-        self.last_unite_attempt_mutex.unlock();
 
         return constants.whois_retry_delay;
     }

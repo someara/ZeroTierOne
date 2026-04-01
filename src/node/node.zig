@@ -523,9 +523,7 @@ pub const Node = struct {
         defer self.networks_mutex.unlock();
 
         if (self.getNetwork(nwid)) |network| {
-            // TODO: Return network config
-            _ = network;
-            return null;
+            return &network.config;
         }
         return null;
     }
@@ -1244,7 +1242,11 @@ pub const Node = struct {
                     const p: *Peer = @ptrCast(@alignCast(peer.?));
                     const pth: *Path = @ptrCast(@alignCast(path.?));
                     const v: Verb = @enumFromInt(verb_val);
-                    const in_re_v: Verb = @enumFromInt(in_re_verb);
+                    // in_re_verb might be invalid if the ERROR packet references an unknown verb
+                    const in_re_v: Verb = std.meta.intToEnum(Verb, in_re_verb) catch blk: {
+                        std.log.warn("ERROR packet references invalid verb {}", .{in_re_verb});
+                        break :blk .nop;
+                    };
 
                     p.received(tptr, pth, hops, packet_id, payload_len, v, in_re_packet_id, in_re_v, trust_established, network_id, flow_id, node.now);
                 }
