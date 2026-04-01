@@ -170,29 +170,21 @@ pub const OutboundMulticast = struct {
             flags |= 0x02;
         }
 
-        // Build the MULTICAST_FRAME packet
-        // Packet header: destination is set per-send, source is our address
+        // Build the MULTICAST_FRAME packet. All appends use a max_packet_length
+        // buffer so failure means the frame + headers exceed MTU — drop it.
         self._packet = Packet.initNew(Address.zero(), my_address, .multicast_frame);
 
-        // Append: network ID (u64)
         self._packet.buf.appendInt(u64, network_id) catch return;
-        // Append: flags (u8)
         self._packet.buf.appendInt(u8, flags) catch return;
-        // Append: gather limit (u32) if requesting gather
         if (gather_limit > 0) {
             self._packet.buf.appendInt(u32, gather_limit) catch return;
         }
-        // Append: source MAC (6 bytes) if explicit source
         if (src.isSet()) {
             src.appendTo(packet_mod.max_packet_length, &self._packet.buf) catch return;
         }
-        // Append: destination MAC (6 bytes)
         dest.mac().appendTo(packet_mod.max_packet_length, &self._packet.buf) catch return;
-        // Append: destination ADI (u32)
         self._packet.buf.appendInt(u32, dest.adi()) catch return;
-        // Append: ether type (u16)
         self._packet.buf.appendInt(u16, @as(u16, @intCast(ether_type & 0xFFFF))) catch return;
-        // Append: payload data
         self._packet.buf.appendBytes(payload[0..self._frame_len]) catch return;
 
         // Compress unless disabled
