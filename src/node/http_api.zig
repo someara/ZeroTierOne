@@ -148,7 +148,7 @@ pub const HttpApi = struct {
 
     fn handleGetNetworks(self: *HttpApi, stream: net.Stream) !void {
         const nwids = self.node.listNetworks(self.allocator) catch {
-            try sendResponse(stream, 200, "OK", "[]");
+            try sendResponse(stream, 500, "Internal Server Error", "{\"error\":\"failed to list networks\"}");
             return;
         };
         defer self.allocator.free(nwids);

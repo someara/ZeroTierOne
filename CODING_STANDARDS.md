@@ -421,6 +421,43 @@ the correct way to remove and then operate on the removed value.
 `getPtr()` returns a **pointer into internal storage**. It is invalidated by any
 mutating operation on the HashMap (`remove`, `put`, `resize`, etc.).
 
+## 7.5. Cast and Truncation Discipline
+
+### Rule 16: `@truncate` vs `@intCast` — choose by intent
+
+- **`@intCast`**: Use when the value is guaranteed to fit (already
+  range-checked or bounded by construction). This documents "I have
+  verified this fits."
+- **`@truncate`**: Use only when you intentionally discard high bits
+  (e.g., extracting the low 32 bits of a 64-bit counter). This
+  documents "I know I'm losing information."
+
+If a value has been masked (`& 0x0f`) or bounded, it fits — use
+`@intCast`, not `@truncate`:
+
+```zig
+// GOOD — masked to 4 bits, guaranteed to fit in u4
+const rcode: u4 = @intCast(byte & 0x0f);
+
+// BAD — implies intentional data loss, but none occurs
+const rcode: u4 = @truncate(byte & 0x0f);
+```
+
+### Rule 17: Document intentional bit-width truncation
+
+When a wire format or protocol mandates a field width narrower than
+the Zig type (e.g., DNS header RCODE is 4 bits but RCode is u8),
+the setter must document this constraint. Silent masking without
+documentation violates "no silent truncation":
+
+```zig
+/// Set the 4-bit RCODE in the header. Only the low 4 bits are
+/// stored; extended RCodes (>15) require the EDNS0 OPT record.
+pub fn setRcode(self: *Header, rc: RCode) void {
+    self.bytes[3] = (self.bytes[3] & 0xf0) | (@intFromEnum(rc) & 0x0f);
+}
+```
+
 ---
 
 ## 8. FreeBSD API Patterns
@@ -475,4 +512,6 @@ When reviewing a change, check for:
 - [ ] HashMap `put()` doesn't silently leak existing entries
 - [ ] No `&.{runtime_value}` patterns (use named variables)
 - [ ] `@intCast` only used where the value is guaranteed to fit
+- [ ] `@truncate` only used for intentional data loss, not masked values
+- [ ] Wire-format setters with narrower bit widths document the constraint
 - [ ] Strings from external input (K8s API, user config) validated before use

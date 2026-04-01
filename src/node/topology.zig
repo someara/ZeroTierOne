@@ -478,14 +478,16 @@ pub const Topology = struct {
     ///
     /// Returns the upstream peer with the best relay quality score,
     /// or null if no upstream peers are known.
+    ///
+    /// Lock order: _upstreams_m before _peers_m (must be consistent
+    /// with getRootsToContact, sendWhoisRequest, _memoizeUpstreams).
     pub fn getUpstreamPeer(self: *Topology, now: i64) ?*Peer {
         _ = now;
+        // Lock order: _upstreams_m first, then _peers_m
+        self._upstreams_m.lock();
+        defer self._upstreams_m.unlock();
         self._peers_m.lock();
         defer self._peers_m.unlock();
-
-        const self_mut: *Topology = @constCast(self);
-        self_mut._upstreams_m.lock();
-        defer self_mut._upstreams_m.unlock();
 
         var best: ?*Peer = null;
         var best_q: u32 = std.math.maxInt(u32);
@@ -639,14 +641,17 @@ pub const Topology = struct {
     /// root entries written.
     pub const RootContact = struct {
         addr: Address,
+        peer: ?*Peer,
         endpoints: [world_mod.max_stable_endpoints_per_root]InetAddress,
         endpoint_count: u32,
     };
 
-    pub fn getRootsToContact(self: *const Topology, out: []RootContact) u32 {
-        const self_mut: *Topology = @constCast(self);
-        self_mut._upstreams_m.lock();
-        defer self_mut._upstreams_m.unlock();
+    /// Lock order: _upstreams_m before _peers_m.
+    pub fn getRootsToContact(self: *Topology, out: []RootContact) u32 {
+        self._upstreams_m.lock();
+        defer self._upstreams_m.unlock();
+        self._peers_m.lock();
+        defer self._peers_m.unlock();
 
         var count: u32 = 0;
 
@@ -655,6 +660,7 @@ pub const Topology = struct {
         for (planet_roots) |r| {
             if (!r.identity.eql(&self._my_identity) and count < out.len) {
                 out[count].addr = r.identity.address();
+                out[count].peer = self._findPeerLocked(r.identity.address());
                 out[count].endpoint_count = r.endpoint_count;
                 for (0..r.endpoint_count) |j| {
                     out[count].endpoints[j] = r.stable_endpoints[j];
@@ -678,6 +684,7 @@ pub const Topology = struct {
                     }
                     if (!dup) {
                         out[count].addr = r.identity.address();
+                        out[count].peer = self._findPeerLocked(r.identity.address());
                         out[count].endpoint_count = r.endpoint_count;
                         for (0..r.endpoint_count) |j| {
                             out[count].endpoints[j] = r.stable_endpoints[j];
@@ -700,6 +707,7 @@ pub const Topology = struct {
                 }
                 if (!dup) {
                     out[count].addr = self._moon_seeds[i].seed;
+                    out[count].peer = null;
                     out[count].endpoint_count = 0;
                     count += 1;
                 }
@@ -1080,6 +1088,16 @@ pub const Topology = struct {
 
     // ── Private Helpers ──────────────────────────────────────
 
+    /// Find a peer by address. Assumes _peers_m is already locked.
+    fn _findPeerLocked(self: *Topology, addr: Address) ?*Peer {
+        for (&self._peers) |*entry| {
+            if (entry.in_use and entry.addr.eql(addr)) {
+                return &entry.peer;
+            }
+        }
+        return null;
+    }
+
     /// Memoize upstream addresses from planet + moons.
     /// Assumes _upstreams_m and _peers_m are already locked.
     fn _memoizeUpstreams(self: *Topology) void {
@@ -1204,7 +1222,7 @@ pub const Topology = struct {
 // Helper: heap-allocate a Topology so the ~5 MB struct doesn't blow the stack.
 fn createTestTopology(my_id: *const Identity) !*Topology {
     const topo = try testing.allocator.create(Topology);
-    topo.* = Topology.create(my_id);
+    topo.create(my_id);
     return topo;
 }
 

@@ -475,7 +475,10 @@ pub const Switch = struct {
         // Add the address we're requesting info about
         var addr_bytes: [5]u8 = undefined;
         addr.toBytes(&addr_bytes);
-        whois_pkt.buf.appendBytes(&addr_bytes) catch return;
+        whois_pkt.buf.appendBytes(&addr_bytes) catch {
+            std.debug.print("[WHOIS] Failed to append address to packet\n", .{});
+            return;
+        };
 
         // Send WHOIS to all root servers / upstream peers
         // We broadcast it because we don't know which peer can answer
@@ -901,7 +904,8 @@ pub const Switch = struct {
     fn computeFlowId(ethertype: u16, frame_data: []const u8) i32 {
         if (ethertype == ethertype_ipv4 and frame_data.len >= 20) {
             const proto = frame_data[9];
-            const header_len = 4 * (frame_data[0] & 0xf);
+            const header_len = @as(u32, 4) * (frame_data[0] & 0xf);
+            if (header_len < 20) return qos_no_flow; // IHL must be >= 5
 
             switch (proto) {
                 0x06, 0x11, 0x84, 0x88 => { // TCP, UDP, SCTP, UDPLite
@@ -918,13 +922,14 @@ pub const Switch = struct {
             var pos: u32 = 40;
             var proto: u32 = frame_data[6];
 
-            // Parse IPv6 extension headers
-            while (pos <= frame_data.len) {
+            // Parse IPv6 extension headers (untrusted data — validate bounds)
+            while (pos + 8 <= frame_data.len) {
                 switch (proto) {
                     0, 43, 60, 135 => {
-                        if (pos + 8 > frame_data.len) break;
                         proto = frame_data[pos];
-                        pos += (@as(u32, frame_data[pos + 1]) * 8) + 8;
+                        const hdr_len = (@as(u32, frame_data[pos + 1]) * 8) + 8;
+                        if (hdr_len > frame_data.len - pos) break; // prevent overflow
+                        pos += hdr_len;
                     },
                     else => break,
                 }

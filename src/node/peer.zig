@@ -78,6 +78,11 @@ const try_memorized_path_interval: i64 = @intCast(constants.try_memorized_path_i
 /// Symmetric key size in bytes.
 const symmetric_key_size: usize = constants.symmetric_key_size;
 
+/// Software version constants for HELLO packets.
+const version_major: u8 = 1;
+const version_minor: u8 = 16;
+const version_revision: u16 = 1;
+
 // ── Callback types ────────────────────────────────────────────────
 
 /// Callback for when a peer learns a new path.
@@ -941,7 +946,7 @@ pub const Peer = struct {
     /// keepalives/pings on active max-priority paths.
     ///
     /// Returns a bit mask: 0x1 if IPv4 pinged, 0x2 if IPv6 pinged.
-    pub fn doPingAndKeepalive(self: *Peer, now: i64) u32 {
+    pub fn doPingAndKeepalive(self: *Peer, now: i64, hello_ctx: ?*const HelloContext) u32 {
         var sent: u32 = 0;
 
         self._paths_m.lock();
@@ -968,7 +973,11 @@ pub const Peer = struct {
             if (pp.p) |p| {
                 if ((now - pp.lr) < peer_path_expiration and pp.priority == max_priority) {
                     if (send_full_hello or p.needsHeartbeat(now)) {
-                        // In the full integration, we would call attemptToContactAt()
+                        if (send_full_hello) {
+                            if (hello_ctx) |hctx| {
+                                self.sendHELLO(p.address(), p.localSocket(), now, hctx);
+                            }
+                        }
                         p.sent(now);
                         sent |= if (p.address().family() == std.c.AF.INET) @as(u32, 0x1) else @as(u32, 0x2);
                     }
@@ -992,6 +1001,77 @@ pub const Peer = struct {
         }
 
         return sent;
+    }
+
+    /// Context for sending HELLO packets (avoids passing many individual params).
+    pub const HelloContext = struct {
+        my_identity: *const Identity,
+        planet_world_id: u64,
+        planet_world_timestamp: u64,
+        wireSendFn: *const fn (?*anyopaque, ?*anyopaque, i64, *const InetAddress, [*]const u8, u32, i32) void,
+        wire_ctx: ?*anyopaque,
+        t_ptr: ?*anyopaque,
+    };
+
+    /// Send a HELLO packet to a specific address.
+    /// Mirrors C++ Peer::sendHELLO (Peer.cpp:426-470).
+    pub fn sendHELLO(
+        self: *Peer,
+        dest_addr: *const InetAddress,
+        local_socket: i64,
+        now: i64,
+        ctx: *const HelloContext,
+    ) void {
+        const Packet = pkt.Packet;
+
+        // Build HELLO packet: dest=peer, src=us, verb=HELLO
+        var outp = Packet.initNew(self._id.address(), ctx.my_identity.address(), .hello);
+
+        // Packet construction — any buffer overflow here means the packet
+        // buffer is too small (should not happen with max_packet_length).
+        outp.buf.appendByte(pkt.protocol_version, 1) catch return self.logHelloFail("protocol_version");
+        outp.buf.appendByte(version_major, 1) catch return self.logHelloFail("version_major");
+        outp.buf.appendByte(version_minor, 1) catch return self.logHelloFail("version_minor");
+        outp.buf.appendInt(u16, version_revision) catch return self.logHelloFail("version_revision");
+        outp.buf.appendInt(i64, now) catch return self.logHelloFail("timestamp");
+        ctx.my_identity.serialize(pkt.max_packet_length, &outp.buf, false) catch return self.logHelloFail("identity");
+        dest_addr.serialize(pkt.max_packet_length, &outp.buf) catch return self.logHelloFail("dest_addr");
+        outp.buf.appendInt(u64, ctx.planet_world_id) catch return self.logHelloFail("planet_id");
+        outp.buf.appendInt(u64, ctx.planet_world_timestamp) catch return self.logHelloFail("planet_ts");
+
+        // Moon section (encrypted with cryptField)
+        const crypt_start = outp.buf.size();
+        outp.buf.appendInt(u16, 0) catch return self.logHelloFail("moon_count");
+
+        // Encrypt moon section with Salsa20/12
+        outp.cryptField(&self._key[0..32].*, crypt_start, outp.buf.size() - crypt_start);
+
+        // Armor with MAC only (encrypt=false), matching C++ armor(_key, false, ...)
+        outp.armor(&self._key[0..32].*, false, false, null, null);
+
+        // Send
+        const pkt_data = outp.buf.data();
+        const send_len = @min(pkt_data.len, pkt.max_packet_length);
+        ctx.wireSendFn(
+            ctx.wire_ctx,
+            ctx.t_ptr,
+            local_socket,
+            dest_addr,
+            pkt_data.ptr,
+            @intCast(send_len),
+            64, // TTL
+        );
+
+        var addr_buf: [64]u8 = undefined;
+        std.debug.print("[HELLO] Sent to {s} ({d} bytes)\n", .{
+            dest_addr.toString(&addr_buf),
+            pkt_data.len,
+        });
+    }
+
+    fn logHelloFail(self: *const Peer, field: []const u8) void {
+        _ = self;
+        std.debug.print("[HELLO] Packet construction failed at field: {s}\n", .{field});
     }
 };
 
@@ -1424,7 +1504,7 @@ test "Peer: doPingAndKeepalive removes expired paths" {
     try testing.expectEqual(@as(u32, 1), peer.totalPathCount());
 
     // Run keepalive after path expiration — should remove the path
-    _ = peer.doPingAndKeepalive(1000 + peer_path_expiration + 1);
+    _ = peer.doPingAndKeepalive(1000 + peer_path_expiration + 1, null);
     try testing.expectEqual(@as(u32, 0), peer.totalPathCount());
 }
 

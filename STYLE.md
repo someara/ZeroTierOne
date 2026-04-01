@@ -158,6 +158,9 @@ Trust boundaries in this project:
 2. **OCI registries** — Manifests, blob digests, tar contents
 3. **C API returns** — errno values, jail IDs, file descriptors
 4. **Network data** — HTTP headers, response bodies, watch events
+5. **Wire protocols** — DNS packets, binary file formats, serialized
+   data from disk or network. Every field must be validated; reserved
+   values must be rejected, not ignored.
 
 ### 4.2 Names and identifiers
 
@@ -184,6 +187,36 @@ Any path component derived from external input must be checked for
 traversal sequences (`..`, absolute paths, null bytes). Symlink
 targets in tar archives must be validated (`isSafeTarPath`,
 `isSafeSymlinkTarget`).
+
+### 4.5 Binary protocol parsing
+
+When parsing untrusted binary data (network packets, file formats):
+
+- **Reject unknown field types.** If a field has reserved or undefined
+  values, return an error — do not silently skip or treat as a default.
+  Accepting unknown values today creates silent data corruption when
+  those values gain meaning tomorrow.
+- **Validate pointer/offset targets.** Any pointer or offset embedded in
+  the data must be bounds-checked against both the data length and a
+  minimum valid offset (e.g., past fixed headers). Forward pointers
+  and self-referencing pointers must be rejected.
+- **Cap recursion/indirection depth.** Compression pointers, nested
+  structures, and recursive references need a hard depth limit to
+  prevent stack overflow or infinite loops from crafted input.
+- **Treat every byte as adversarial.** Do not assume fields contain
+  valid values just because earlier fields were valid. Validate each
+  field independently.
+
+### 4.6 Struct invariants
+
+When a struct's methods depend on internal data being well-formed
+(e.g., a buffer always containing valid wire-format data), document
+the invariant in a doc comment on the struct. This tells readers
+which guarantee makes the code safe, and which constructors/mutators
+are responsible for maintaining it.
+
+If the struct's fields are public, the invariant comment must note
+that direct field mutation can break it.
 
 ---
 
@@ -224,6 +257,37 @@ A source file should have this order:
 5. Public functions
 6. Private functions
 7. Tests (at bottom)
+
+### 5.5 Bitwise expression readability
+
+Always parenthesize bitwise operators (`&`, `|`, `^`) when combined
+with comparison operators (`==`, `!=`, `<`, `>`), even though Zig's
+precedence makes it unnecessary. Readers from C/C++ backgrounds will
+misread the precedence:
+
+```zig
+// GOOD
+if ((flags & 0x80) != 0) ...
+if ((label_type & 0xc0) == 0xc0) ...
+
+// BAD — correct in Zig, misread by humans
+if (flags & 0x80 != 0) ...
+```
+
+### 5.6 Doc comment accuracy
+
+A doc comment is a contract. If a function's documented behavior
+differs from its actual behavior, that is a bug — fix the code or
+fix the comment, but never leave them divergent. When behavior has
+caveats or limitations, state them in the doc comment rather than
+leaving the caller to discover them by reading the implementation.
+
+### 5.7 Dead code
+
+Remove unused constants, functions, and imports immediately. Dead code
+misleads readers into thinking it is load-bearing. If code is
+intentionally kept for future use, it must have a comment explaining
+what will use it and when — otherwise delete it.
 
 ---
 
@@ -350,6 +414,11 @@ When hunting bugs:
 Do not batch-discover dozens of issues before fixing any. Small
 iterations catch regressions early and keep commits reviewable.
 
+When adding a new rule to these standards, sweep the existing codebase
+for violations before considering the rule adopted. A rule that only
+applies to future code creates an inconsistent codebase where the
+same pattern is correct in old files and incorrect in new ones.
+
 ### 9.2 Severity classification
 
 | Level | Definition | Example |
@@ -374,6 +443,18 @@ Before declaring a feature complete:
 - Deploy the agent against a real K8s API server.
 - Exercise the feature end-to-end (create pod, observe logs, verify
   cleanup).
+
+### 9.5 Test expectations for new code
+
+Every new public function must have at least:
+- One test for the happy path.
+- One test for each documented error return.
+- One test for boundary conditions (empty input, maximum size, zero).
+
+For parsers, also add:
+- One test for malformed/adversarial input per field.
+- One round-trip test (parse → serialize → compare) when a writer
+  exists.
 
 ---
 

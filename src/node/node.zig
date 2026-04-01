@@ -323,8 +323,49 @@ pub const Node = struct {
         if (time_since_last_ping >= time_until_next_ping) {
             self.last_ping_check = now;
 
-            // TODO: Get roots to contact
-            // TODO: Ping active peers
+            // Contact root servers — send HELLO to establish peer relationships
+            {
+                const TopologyMod = @import("topology.zig");
+                const PeerMod = @import("peer.zig");
+
+                var root_contacts: [TopologyMod.max_upstream_addresses]TopologyMod.Topology.RootContact = undefined;
+                const root_count = self.topology.getRootsToContact(&root_contacts);
+
+                if (root_count > 0) {
+                    const hello_ctx = PeerMod.Peer.HelloContext{
+                        .my_identity = &self.identity,
+                        .planet_world_id = self.topology.planetWorldId(),
+                        .planet_world_timestamp = self.topology.planetWorldTimestamp(),
+                        .wireSendFn = self.callbacks.wireSend,
+                        .wire_ctx = self.callbacks.ctx,
+                        .t_ptr = t_ptr,
+                    };
+
+                    for (0..root_count) |ri| {
+                        const rc = &root_contacts[ri];
+
+                        if (rc.peer) |peer| {
+                            // Ping/keepalive on existing paths (sends HELLO if due)
+                            const sent_mask = peer.doPingAndKeepalive(now, &hello_ctx);
+
+                            // Send HELLO to stable endpoints for uncovered address families
+                            for (0..rc.endpoint_count) |ei| {
+                                const ep = &rc.endpoints[ei];
+                                const family = ep.family();
+                                const covered = if (family == std.c.AF.INET)
+                                    (sent_mask & 0x1) != 0
+                                else
+                                    (sent_mask & 0x2) != 0;
+
+                                if (!covered) {
+                                    peer.sendHELLO(ep, -1, now, &hello_ctx);
+                                    break; // one per address family, like C++
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             // Request network configs for networks that need them
             {
@@ -703,13 +744,14 @@ pub const Node = struct {
 
                     // Send via the path
                     const pkt_data = pkt.buf.data();
+                    const send_len = @min(pkt_data.len, @import("packet.zig").max_packet_length);
                     node.callbacks.wireSend(
                         node.callbacks.ctx,
                         null, // t_ptr
                         path.?.localSocket(),
                         path.?.address(),
                         pkt_data.ptr,
-                        @intCast(pkt_data.len),
+                        @intCast(send_len),
                         64, // ttl
                     );
 
@@ -907,17 +949,15 @@ pub const Node = struct {
                     node.topology._upstreams_m.lock();
                     defer node.topology._upstreams_m.unlock();
 
-                    std.debug.print("  [WHOIS] Sending to {d} upstreams\n", .{node.topology._upstream_count});
-
                     // Send to all upstream addresses (root servers)
                     var i: usize = 0;
                     while (i < node.topology._upstream_count) : (i += 1) {
                         const upstream_addr = node.topology._upstream_addresses[i];
-                        var addr_buf: [10]u8 = undefined;
-                        std.debug.print("  [WHOIS] Trying upstream {s}\n", .{upstream_addr.toString(&addr_buf)});
 
-                        // Try to find a peer for this upstream address
+                        // Find peer and copy key material under lock.
+                        // Lock order: _upstreams_m (held above) before _peers_m.
                         node.topology._peers_m.lock();
+
                         var found_peer: ?*@import("peer.zig").Peer = null;
                         var j: usize = 0;
                         while (j < TopologyMod.max_peers) : (j += 1) {
@@ -927,41 +967,55 @@ pub const Node = struct {
                                 break;
                             }
                         }
-                        node.topology._peers_m.unlock();
 
-                        // If we have a peer for this upstream, armor and send via ALL paths
+                        // If we have a peer, copy key and paths while still holding lock
                         if (found_peer) |peer| {
                             const PeerMod = @import("peer.zig");
                             var path_buf: [PeerMod.max_peer_network_paths]?*@import("path.zig").Path = undefined;
                             const path_count = peer.getAllPaths(&path_buf);
 
-                            // Re-address, armor with peer key, send to each path
-                            var addressed_pkt = pkt.*;
-                            addressed_pkt.setDestination(upstream_addr);
-
                             const peer_key = peer.key();
                             var key32: [32]u8 = undefined;
                             @memcpy(&key32, peer_key[0..32]);
-                            addressed_pkt.armor(&key32, true, false, null, null);
 
+                            // Copy path addresses while locked (paths are stable pointers
+                            // from topology, but capture what we need now)
+                            var path_addrs: [PeerMod.max_peer_network_paths]InetAddress = undefined;
+                            var path_sockets: [PeerMod.max_peer_network_paths]i64 = undefined;
                             var pi: u32 = 0;
                             while (pi < path_count) : (pi += 1) {
                                 if (path_buf[pi]) |path| {
+                                    path_addrs[pi] = path.address().*;
+                                    path_sockets[pi] = path.localSocket();
+                                }
+                            }
+
+                            node.topology._peers_m.unlock();
+
+                            // Armor and send outside the lock
+                            var addressed_pkt = pkt.*;
+                            addressed_pkt.setDestination(upstream_addr);
+                            addressed_pkt.armor(&key32, true, false, null, null);
+
+                            pi = 0;
+                            while (pi < path_count) : (pi += 1) {
+                                if (path_buf[pi] != null) {
                                     const pkt_data = addressed_pkt.buf.data();
+                                    const pkt_len = @min(pkt_data.len, @import("packet.zig").max_packet_length);
                                     node.callbacks.wireSend(
                                         node.callbacks.ctx,
                                         null,
-                                        path.localSocket(),
-                                        path.address(),
+                                        path_sockets[pi],
+                                        &path_addrs[pi],
                                         pkt_data.ptr,
-                                        @intCast(pkt_data.len),
+                                        @intCast(pkt_len),
                                         64,
                                     );
                                     sent = true;
                                 }
                             }
                         } else {
-                            std.debug.print("  [WHOIS] No peer found for upstream\n", .{});
+                            node.topology._peers_m.unlock();
                         }
                     }
 
