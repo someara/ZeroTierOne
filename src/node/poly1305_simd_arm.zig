@@ -5,7 +5,6 @@
 /// but optimized for ARM64.
 ///
 /// Performance target: Match or exceed C++ performance (2800+ MiB/s)
-
 const std = @import("std");
 const builtin = @import("builtin");
 

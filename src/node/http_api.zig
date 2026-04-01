@@ -8,7 +8,6 @@
 ///   GET    /network         — List joined networks
 ///   POST   /network/{id}    — Join a network
 ///   DELETE /network/{id}    — Leave a network
-
 const std = @import("std");
 const mem = std.mem;
 const net = std.net;
@@ -247,7 +246,8 @@ pub const HttpApi = struct {
 
     fn sendResponse(stream: net.Stream, code: u16, reason: []const u8, body: []const u8) !void {
         var header_buf: [256]u8 = undefined;
-        const header = try std.fmt.bufPrint(&header_buf,
+        const header = try std.fmt.bufPrint(
+            &header_buf,
             "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
             .{ code, reason, body.len },
         );

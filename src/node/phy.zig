@@ -19,7 +19,6 @@
 /// - Zero-copy where possible
 /// - Efficient event loop (O(n) sockets, but typically < 100)
 /// - Memory pools for socket structs (future optimization)
-
 const std = @import("std");
 const net = std.net;
 const os = std.os;
@@ -281,7 +280,7 @@ pub const Phy = struct {
             .remote_addr = local_addr,
         };
 
-        try self.sockets.append(self.allocator,sock_impl);
+        try self.sockets.append(self.allocator, sock_impl);
         return @ptrCast(sock_impl);
     }
 
@@ -351,7 +350,7 @@ pub const Phy = struct {
             .remote_addr = local_addr,
         };
 
-        try self.sockets.append(self.allocator,sock_impl);
+        try self.sockets.append(self.allocator, sock_impl);
         return @ptrCast(sock_impl);
     }
 
@@ -409,7 +408,7 @@ pub const Phy = struct {
             .remote_addr = remote_addr,
         };
 
-        try self.sockets.append(self.allocator,sock_impl);
+        try self.sockets.append(self.allocator, sock_impl);
         return @ptrCast(sock_impl);
     }
 
@@ -631,7 +630,7 @@ pub const Phy = struct {
                             .remote_addr = client_addr,
                         };
 
-                        self.sockets.append(self.allocator,new_sock_impl) catch {
+                        self.sockets.append(self.allocator, new_sock_impl) catch {
                             posix.close(client_sock);
                             self.allocator.destroy(new_sock_impl);
                             continue;

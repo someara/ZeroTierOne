@@ -12,7 +12,6 @@
 /// PORTABILITY: ARM64 (aarch64) only with NEON + AES extensions
 ///
 /// This code intentionally sacrifices Zig's type safety for performance.
-
 const std = @import("std");
 const builtin = @import("builtin");
 const Aes = @import("aes.zig").Aes;

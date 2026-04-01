@@ -5,7 +5,6 @@
 /// we process multiple rounds in parallel using SIMD instructions.
 ///
 /// Performance target: ~2x speedup over scalar implementation.
-
 const std = @import("std");
 const builtin = @import("builtin");
 

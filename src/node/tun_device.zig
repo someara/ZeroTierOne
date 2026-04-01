@@ -17,7 +17,6 @@
 ///
 ///   // Write packets
 ///   try tun.write(packet_data);
-
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
@@ -108,7 +107,7 @@ pub const TunDevice = struct {
             .ss_sysaddr = SYSPROTO_CONTROL,
             .sc_id = info.ctl_id,
             .sc_unit = 0, // 0 = kernel assigns first available unit
-            .sc_reserved = .{0, 0, 0, 0, 0},
+            .sc_reserved = .{ 0, 0, 0, 0, 0 },
         };
 
         // Connect to the kernel control
@@ -148,7 +147,7 @@ pub const TunDevice = struct {
         const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
         _ = try posix.fcntl(fd, posix.F.SETFL, flags | O_NONBLOCK);
 
-        std.debug.print("  ✓ Opened TUN device: {s} (fd={d})\n", .{name, fd});
+        std.debug.print("  ✓ Opened TUN device: {s} (fd={d})\n", .{ name, fd });
 
         return TunDevice{
             .allocator = allocator,
@@ -262,8 +261,8 @@ pub const TunDevice = struct {
         var ip_buf: [16]u8 = undefined;
         var netmask_buf: [16]u8 = undefined;
 
-        const ip_str = try std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{ip[0], ip[1], ip[2], ip[3]});
-        const netmask_str = try std.fmt.bufPrint(&netmask_buf, "{d}.{d}.{d}.{d}", .{netmask[0], netmask[1], netmask[2], netmask[3]});
+        const ip_str = try std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] });
+        const netmask_str = try std.fmt.bufPrint(&netmask_buf, "{d}.{d}.{d}.{d}", .{ netmask[0], netmask[1], netmask[2], netmask[3] });
 
         // Use ifconfig to set the address
         // ifconfig utunN <ip> <peer_ip> netmask <netmask>
@@ -288,7 +287,7 @@ pub const TunDevice = struct {
             return error.IfconfigFailed;
         }
 
-        std.debug.print("  ✓ Set address: {s} netmask {s}\n", .{ip_str, netmask_str});
+        std.debug.print("  ✓ Set address: {s} netmask {s}\n", .{ ip_str, netmask_str });
     }
 
     /// Set address on Linux using ioctl
@@ -314,8 +313,8 @@ pub const TunDevice = struct {
         var dest_buf: [16]u8 = undefined;
         var netmask_buf: [16]u8 = undefined;
 
-        const dest_str = try std.fmt.bufPrint(&dest_buf, "{d}.{d}.{d}.{d}", .{dest[0], dest[1], dest[2], dest[3]});
-        const netmask_str = try std.fmt.bufPrint(&netmask_buf, "{d}.{d}.{d}.{d}", .{netmask[0], netmask[1], netmask[2], netmask[3]});
+        const dest_str = try std.fmt.bufPrint(&dest_buf, "{d}.{d}.{d}.{d}", .{ dest[0], dest[1], dest[2], dest[3] });
+        const netmask_str = try std.fmt.bufPrint(&netmask_buf, "{d}.{d}.{d}.{d}", .{ netmask[0], netmask[1], netmask[2], netmask[3] });
 
         const argv = [_][]const u8{
             "/sbin/route",
@@ -338,7 +337,7 @@ pub const TunDevice = struct {
             return;
         }
 
-        std.debug.print("  ✓ Added route: {s}/{s} via {s}\n", .{dest_str, netmask_str, self.name});
+        std.debug.print("  ✓ Added route: {s}/{s} via {s}\n", .{ dest_str, netmask_str, self.name });
     }
 
     /// Get the device file descriptor (for select/poll)

@@ -13,7 +13,6 @@
 ///
 /// This code intentionally sacrifices Zig's type safety for performance.
 /// Use only when C++ parity is required.
-
 const std = @import("std");
 const builtin = @import("builtin");
 const Aes = @import("aes.zig").Aes;

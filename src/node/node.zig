@@ -14,7 +14,6 @@
 /// - Time management
 ///
 /// The Node exposes a C API (via callbacks) to the host application.
-
 const std = @import("std");
 const mem = std.mem;
 const testing = std.testing;
@@ -1279,7 +1278,7 @@ pub const Node = struct {
             }.f,
 
             .pathAddress = struct {
-                var stub_address: InetAddress = InetAddress.initV4([4]u8{127, 0, 0, 1}, 9993);
+                var stub_address: InetAddress = InetAddress.initV4([4]u8{ 127, 0, 0, 1 }, 9993);
 
                 fn f(_: ?*anyopaque, path: ?*anyopaque) *const InetAddress {
                     if (path) |p| {
