@@ -81,6 +81,7 @@ pub fn build(b: *std.Build) void {
         // Regression tests
         "src/test_salsa20_keystream_regression.zig",
         "src/test_expected_reply_regression.zig",
+        "src/test_fragment_reassembly_regression.zig",
     };
 
     const test_step = b.step("test", "Run Zig module tests");
