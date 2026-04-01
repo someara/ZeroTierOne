@@ -336,22 +336,24 @@ pub const Fragment = struct {
 
     pub fn totalFragments(self: *const Fragment) u4 {
         const b = self.buf.getByte(frag_idx_fragment_no) catch return 0;
-        return @truncate(b >> 4);
+        return @intCast(b >> 4);
     }
 
     pub fn fragmentNumber(self: *const Fragment) u4 {
         const b = self.buf.getByte(frag_idx_fragment_no) catch return 0;
-        return @truncate(b & 0x0f);
+        return @intCast(b & 0x0f);
     }
 
     pub fn hops(self: *const Fragment) u3 {
         const b = self.buf.getByte(frag_idx_hops) catch return 0;
-        return @truncate(b & 0x07);
+        return @intCast(b & 0x07);
     }
 
     pub fn incrementHops(self: *Fragment) void {
         const b = self.buf.getByte(frag_idx_hops) catch return;
-        self.buf.setByte(frag_idx_hops, (b & 0xf8) | ((b +% 1) & 0x07)) catch {};
+        self.buf.setByte(frag_idx_hops, (b & 0xf8) | ((b +% 1) & 0x07)) catch |err| {
+            std.log.warn("Failed to increment fragment hops: {}", .{err});
+        };
     }
 
     pub fn payloadLength(self: *const Fragment) u32 {
@@ -486,17 +488,19 @@ pub const Packet = struct {
 
     pub fn hops(self: *const Packet) u3 {
         const b = self.buf.getByte(idx_flags) catch return 0;
-        return @truncate(b & 0x07);
+        return @intCast(b & 0x07);
     }
 
     pub fn incrementHops(self: *Packet) void {
         const b = self.buf.getByte(idx_flags) catch return;
-        self.buf.setByte(idx_flags, (b & 0xf8) | ((b +% 1) & 0x07)) catch {};
+        self.buf.setByte(idx_flags, (b & 0xf8) | ((b +% 1) & 0x07)) catch |err| {
+            std.log.warn("Failed to increment packet hops: {}", .{err});
+        };
     }
 
     pub fn cipher(self: *const Packet) CipherSuite {
         const b = self.buf.getByte(idx_flags) catch return .c25519_poly1305_none;
-        const raw: u3 = @truncate((b >> 3) & 0x07);
+        const raw: u3 = @intCast((b >> 3) & 0x07);
         return @enumFromInt(raw);
     }
 
