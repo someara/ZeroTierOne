@@ -23,6 +23,7 @@ const identity_mod = @import("identity.zig");
 const Identity = identity_mod.Identity;
 const InetAddress = @import("inet_address.zig").InetAddress;
 const MAC = @import("mac.zig").MAC;
+const MulticastGroup = @import("multicast_group.zig").MulticastGroup;
 const network_mod = @import("network.zig");
 const Network = network_mod.Network;
 const NetworkConfig = @import("network_config.zig").NetworkConfig;
@@ -621,12 +622,8 @@ pub const Node = struct {
     ) !void {
         const network = self.getNetwork(nwid) orelse return error.NetworkNotFound;
 
-        _ = t_ptr;
-        _ = network;
-        _ = multicast_group;
-        _ = multicast_adi;
-
-        // TODO: Call network.multicastSubscribe
+        const mg = MulticastGroup.init(MAC.init(multicast_group), multicast_adi);
+        network.multicastSubscribe(t_ptr, mg);
     }
 
     /// Unsubscribe from a multicast group.
@@ -638,11 +635,8 @@ pub const Node = struct {
     ) !void {
         const network = self.getNetwork(nwid) orelse return error.NetworkNotFound;
 
-        _ = network;
-        _ = multicast_group;
-        _ = multicast_adi;
-
-        // TODO: Call network.multicastUnsubscribe
+        const mg = MulticastGroup.init(MAC.init(multicast_group), multicast_adi);
+        network.multicastUnsubscribe(&mg);
     }
 
     /// Add a moon (user-defined root server).
@@ -1138,7 +1132,6 @@ pub const Node = struct {
         const IncomingPacketCallbacks = @import("incoming_packet.zig").Callbacks;
         const IncomingAes = @import("aes.zig").Aes;
         const IncomingEcc = @import("ecc.zig");
-        const MulticastGroup = @import("multicast_group.zig").MulticastGroup;
 
         return IncomingPacketCallbacks{
             .ctx = @ptrCast(self),
