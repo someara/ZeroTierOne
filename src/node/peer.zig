@@ -1590,6 +1590,7 @@ test "Peer: sendHELLO constructs valid packet" {
         .wireSendFn = &Capture.wireSend,
         .expectReplyFn = null,
         .wire_ctx = null,
+        .expect_ctx = null,
         .t_ptr = null,
     };
 

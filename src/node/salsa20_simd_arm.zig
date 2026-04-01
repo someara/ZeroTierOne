@@ -36,20 +36,27 @@ pub fn salsa20_12_xor_neon(
     var state: [16]u32 align(16) = undefined;
 
     // Initialize state
-    // sigma constants: "expand 32-byte k"
-    state[0] = 0x61707865;
-    state[5] = 0x3320646e;
-    state[10] = 0x79622d32;
-    state[15] = 0x6b206574;
+    // Zig stdlib Salsa20 state matrix layout (different from DJB spec!):
+    //   const0  k0      k1      k2
+    //   k3      const1  nonce0  nonce1
+    //   ctr_lo  ctr_hi  const2  k4
+    //   k5      k6      k7      const3
+    state[0] = 0x61707865;  // "expa"
+    state[5] = 0x3320646e;  // "nd 3"
+    state[10] = 0x79622d32; // "2-by"
+    state[15] = 0x6b206574; // "te k"
 
-    // Key (256 bits = 8 x u32)
-    inline for (0..8) |i| {
+    // Key: k0-k3 at positions 1-4, k4-k7 at positions 11-14
+    inline for (0..4) |i| {
         state[1 + i] = std.mem.readInt(u32, key[i * 4 ..][0..4], .little);
     }
+    inline for (0..4) |i| {
+        state[11 + i] = std.mem.readInt(u32, key[16 + i * 4 ..][0..4], .little);
+    }
 
-    // Nonce (64 bits = 2 x u32)
-    state[11] = std.mem.readInt(u32, nonce[0..4], .little);
-    state[12] = std.mem.readInt(u32, nonce[4..8], .little);
+    // Nonce at positions 6-7
+    state[6] = std.mem.readInt(u32, nonce[0..4], .little);
+    state[7] = std.mem.readInt(u32, nonce[4..8], .little);
 
     var block_counter = counter;
     var remaining = in;
@@ -58,14 +65,18 @@ pub fn salsa20_12_xor_neon(
     // Process 64-byte blocks
     // Process 2 blocks at once for Salsa20/12 (better balance for fewer rounds)
     while (remaining.len >= 128) {
-        var w0: [16]u32 align(16) = state;
-        var w1: [16]u32 align(16) = state;
+        // Create complete initial states for both blocks (with proper counters)
+        var init0: [16]u32 align(16) = state;
+        init0[8] = @truncate(block_counter);
+        init0[9] = @truncate(block_counter >> 32);
 
-        // Set counters for 2 blocks
-        w0[13] = @truncate(block_counter);
-        w0[14] = @truncate(block_counter >> 32);
-        w1[13] = @truncate(block_counter + 1);
-        w1[14] = @truncate((block_counter + 1) >> 32);
+        var init1: [16]u32 align(16) = state;
+        init1[8] = @truncate(block_counter + 1);
+        init1[9] = @truncate((block_counter + 1) >> 32);
+
+        // Working copies for Salsa20 rounds
+        var w0: [16]u32 align(16) = init0;
+        var w1: [16]u32 align(16) = init1;
 
         // Process 2 blocks in parallel (6 double-rounds each)
         inline for (0..6) |_| {
@@ -90,10 +101,10 @@ pub fn salsa20_12_xor_neon(
             quarterRound(&w1[15], &w1[12], &w1[13], &w1[14]);
         }
 
-        // Add original state and XOR with input
+        // Add initial states back (Salsa20 finalization)
         inline for (0..16) |i| {
-            w0[i] +%= state[i];
-            w1[i] +%= state[i];
+            w0[i] +%= init0[i];
+            w1[i] +%= init1[i];
         }
 
         // XOR block 0
@@ -115,8 +126,8 @@ pub fn salsa20_12_xor_neon(
     // Process remaining blocks one at a time
     while (remaining.len >= 64) {
         // Set block counter
-        state[13] = @truncate(block_counter);
-        state[14] = @truncate(block_counter >> 32);
+        state[8] = @truncate(block_counter);
+        state[9] = @truncate(block_counter >> 32);
 
         // Core Salsa20/12 (12 rounds = 6 double rounds)
         var working: [16]u32 align(16) = state;
@@ -159,8 +170,8 @@ pub fn salsa20_12_xor_neon(
 
     // Handle remaining bytes (< 64)
     if (remaining.len > 0) {
-        state[13] = @truncate(block_counter);
-        state[14] = @truncate(block_counter >> 32);
+        state[8] = @truncate(block_counter);
+        state[9] = @truncate(block_counter >> 32);
 
         var working: [16]u32 = state;
 
@@ -222,20 +233,23 @@ pub fn salsa20_20_xor_neon(
     // Salsa20 state matrix (16 x u32)
     var state: [16]u32 align(16) = undefined;
 
-    // Initialize state (same as Salsa20/12)
-    state[0] = 0x61707865;
-    state[5] = 0x3320646e;
-    state[10] = 0x79622d32;
-    state[15] = 0x6b206574;
+    // Initialize state (same layout as Salsa20/12)
+    state[0] = 0x61707865;  // "expa"
+    state[5] = 0x3320646e;  // "nd 3"
+    state[10] = 0x79622d32; // "2-by"
+    state[15] = 0x6b206574; // "te k"
 
-    // Key (256 bits = 8 x u32)
-    inline for (0..8) |i| {
+    // Key: k0-k3 at positions 1-4, k4-k7 at positions 11-14
+    inline for (0..4) |i| {
         state[1 + i] = std.mem.readInt(u32, key[i * 4 ..][0..4], .little);
     }
+    inline for (0..4) |i| {
+        state[11 + i] = std.mem.readInt(u32, key[16 + i * 4 ..][0..4], .little);
+    }
 
-    // Nonce (64 bits = 2 x u32)
-    state[11] = std.mem.readInt(u32, nonce[0..4], .little);
-    state[12] = std.mem.readInt(u32, nonce[4..8], .little);
+    // Nonce at positions 6-7
+    state[6] = std.mem.readInt(u32, nonce[0..4], .little);
+    state[7] = std.mem.readInt(u32, nonce[4..8], .little);
 
     var block_counter = counter;
     var remaining = in;
@@ -244,20 +258,28 @@ pub fn salsa20_20_xor_neon(
     // Process 64-byte blocks
     // Try to process 4 blocks at once for better ILP
     while (remaining.len >= 256) {
-        var w0: [16]u32 align(16) = state;
-        var w1: [16]u32 align(16) = state;
-        var w2: [16]u32 align(16) = state;
-        var w3: [16]u32 align(16) = state;
+        // Create complete initial states for all 4 blocks (with proper counters)
+        var init0: [16]u32 align(16) = state;
+        init0[8] = @truncate(block_counter);
+        init0[9] = @truncate(block_counter >> 32);
 
-        // Set counters for 4 blocks
-        w0[13] = @truncate(block_counter);
-        w0[14] = @truncate(block_counter >> 32);
-        w1[13] = @truncate(block_counter + 1);
-        w1[14] = @truncate((block_counter + 1) >> 32);
-        w2[13] = @truncate(block_counter + 2);
-        w2[14] = @truncate((block_counter + 2) >> 32);
-        w3[13] = @truncate(block_counter + 3);
-        w3[14] = @truncate((block_counter + 3) >> 32);
+        var init1: [16]u32 align(16) = state;
+        init1[8] = @truncate(block_counter + 1);
+        init1[9] = @truncate((block_counter + 1) >> 32);
+
+        var init2: [16]u32 align(16) = state;
+        init2[8] = @truncate(block_counter + 2);
+        init2[9] = @truncate((block_counter + 2) >> 32);
+
+        var init3: [16]u32 align(16) = state;
+        init3[8] = @truncate(block_counter + 3);
+        init3[9] = @truncate((block_counter + 3) >> 32);
+
+        // Working copies for Salsa20 rounds
+        var w0: [16]u32 align(16) = init0;
+        var w1: [16]u32 align(16) = init1;
+        var w2: [16]u32 align(16) = init2;
+        var w3: [16]u32 align(16) = init3;
 
         // Process 4 blocks in parallel (10 double-rounds each)
         inline for (0..10) |_| {
@@ -302,12 +324,12 @@ pub fn salsa20_20_xor_neon(
             quarterRound(&w3[15], &w3[12], &w3[13], &w3[14]);
         }
 
-        // Add original state and XOR with input
+        // Add initial states back (Salsa20 finalization)
         inline for (0..16) |i| {
-            w0[i] +%= state[i];
-            w1[i] +%= state[i];
-            w2[i] +%= state[i];
-            w3[i] +%= state[i];
+            w0[i] +%= init0[i];
+            w1[i] +%= init1[i];
+            w2[i] +%= init2[i];
+            w3[i] +%= init3[i];
         }
 
         // XOR block 0
@@ -339,8 +361,8 @@ pub fn salsa20_20_xor_neon(
     // Process remaining blocks one at a time
     while (remaining.len >= 64) {
         // Set block counter
-        state[13] = @truncate(block_counter);
-        state[14] = @truncate(block_counter >> 32);
+        state[8] = @truncate(block_counter);
+        state[9] = @truncate(block_counter >> 32);
 
         // Core Salsa20/20 (20 rounds = 10 double rounds)
         var working: [16]u32 align(16) = state;
@@ -383,8 +405,8 @@ pub fn salsa20_20_xor_neon(
 
     // Handle remaining bytes (< 64)
     if (remaining.len > 0) {
-        state[13] = @truncate(block_counter);
-        state[14] = @truncate(block_counter >> 32);
+        state[8] = @truncate(block_counter);
+        state[9] = @truncate(block_counter >> 32);
 
         var working: [16]u32 = state;
 

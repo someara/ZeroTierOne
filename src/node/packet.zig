@@ -668,12 +668,12 @@ pub const Packet = struct {
         var mac_key: [32]u8 = undefined;
         s20.crypt12(&mac_key, &zero_key);
 
-        // Encrypt payload if requested (continuing from block 1).
+        // Encrypt payload if requested.
         if (encrypt_payload) {
-            // Skip the rest of block 0 (32 bytes already used for mac key).
-            var skip_buf: [32]u8 = undefined;
-            s20.crypt12(&skip_buf, &([_]u8{0} ** 32));
-
+            // Encrypt payload starting from byte 64 of keystream (after MAC key).
+            // Note: crypt12() with 32-byte input consumes one full 64-byte Salsa20 block
+            // and advances the block counter to 1. We're now positioned at byte 64 of
+            // the keystream, ready to encrypt the payload.
             const payload = pkt_data[payload_start..][0..total_payload_len];
             s20.crypt12(payload, payload);
         }
