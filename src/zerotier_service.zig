@@ -521,6 +521,16 @@ fn onPhyDatagram(
 
     std.debug.print("→ Received {d} bytes from port {d}\n", .{data.len, from_port});
 
+    // Debug: print first 32 bytes of packet
+    if (data.len >= 32) {
+        std.debug.print("  → Raw packet hex: ", .{});
+        for (0..32) |i| {
+            std.debug.print("{x:0>2}", .{data[i]});
+            if (i % 2 == 1) std.debug.print(" ", .{});
+        }
+        std.debug.print("\n", .{});
+    }
+
     // Pass packet to Node for processing
     const now = std.time.milliTimestamp();
     const local_sock: i64 = 0; // Use socket 0 as identifier

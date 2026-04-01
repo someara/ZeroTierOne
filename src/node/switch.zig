@@ -766,8 +766,28 @@ pub const Switch = struct {
             return;
         }
 
-        const flags = data[constants.packet_idx_flags];
+        const flags = data[packet_mod.idx_flags];
+        const verb = data[packet_mod.idx_verb];
+        const cipher = (flags >> 5) & 0x07;
         const is_fragmented = (flags & constants.proto_flag_fragmented) != 0;
+
+        // Debug: Log packet details
+        const verb_names = [_][]const u8{
+            "NOP", "HELLO", "ERROR", "OK", "WHOIS", "RENDEZVOUS",
+            "FRAME", "EXT_FRAME", "ECHO", "MULTICAST_LIKE", "NETWORK_CREDENTIALS",
+            "NETWORK_CONFIG_REQUEST", "NETWORK_CONFIG", "MULTICAST_GATHER",
+            "MULTICAST_FRAME", "PUSH_DIRECT_PATHS", "USER_MESSAGE",
+        };
+        const verb_name = if (verb < verb_names.len) verb_names[verb] else "UNKNOWN";
+        std.debug.print("  [PKT] {} bytes: src={x:0>10} dest={x:0>10} verb={s}({d}) cipher={d} flags=0x{x:0>2}\n", .{
+            len,
+            src_addr.toInt(),
+            dest_addr.toInt(),
+            verb_name,
+            verb,
+            cipher,
+            flags,
+        });
 
         if (is_fragmented) {
             // Fragment 0 (head of fragmented packet)
