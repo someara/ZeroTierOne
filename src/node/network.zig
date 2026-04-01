@@ -2104,6 +2104,10 @@ const version_revision: u64 = 1;
 
 /// Build a request metadata dictionary for VERB_NETWORK_CONFIG_REQUEST.
 /// Contains version info, capabilities, and platform identification.
+///
+/// Note: `catch {}` on addU64/addStr is acceptable here because these are
+/// all comptime-known small values and the dictionary capacity is sized to
+/// fit them all. Overflow cannot happen in practice.
 fn buildRequestMetadata() Dictionary(network_config.metadata_dict_capacity) {
     var rmd = Dictionary(network_config.metadata_dict_capacity).init();
     rmd.addU64("v", networkconfig_version) catch {};

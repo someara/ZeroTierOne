@@ -256,7 +256,8 @@ pub const Path = struct {
         data: []const u8,
         now: i64,
     ) bool {
-        if (send_fn(ctx, self._local_socket, &self._addr, data.ptr, @intCast(data.len))) {
+        const send_len: u32 = std.math.cast(u32, data.len) orelse return false;
+        if (send_fn(ctx, self._local_socket, &self._addr, data.ptr, send_len)) {
             self._last_out = now;
             return true;
         }

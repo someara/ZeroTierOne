@@ -702,7 +702,9 @@ pub const Packet = struct {
         ctr.finish();
 
         // Append ephemeral public key (X25519 portion, 32 bytes).
-        self.buf.appendBytes(ephemeral_kp.public_key[0..ecc.ephemeral_public_key_len]) catch {};
+        // If this fails, the packet is incomplete and dearmor will fail
+        // on the receiver — this is a fatal send error for this packet.
+        self.buf.appendBytes(ephemeral_kp.public_key[0..ecc.ephemeral_public_key_len]) catch return;
     }
 
     // ── Dearmor (verify MAC + decrypt) ────────────────────────────
