@@ -619,7 +619,10 @@ fn nodeStateObjectDelete(
 
     var path_buf: [512]u8 = undefined;
     const path = stateObjectPath(home_dir, object_type, &path_buf) orelse return;
-    std.fs.deleteFileAbsolute(path) catch {};
+    std.fs.deleteFileAbsolute(path) catch |err| switch (err) {
+        error.FileNotFound => {}, // Expected for objects that don't exist yet
+        else => std.debug.print("  ⚠ Failed to delete state object: {}\n", .{err}),
+    };
 }
 
 /// Node callback: Send packet on wire (UDP)

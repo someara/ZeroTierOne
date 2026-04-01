@@ -1567,16 +1567,19 @@ pub const Network = struct {
         if (save_to_disk) {
             if (self._callbacks.state_object_put) |put_fn| {
                 var dict = Dictionary(network_config.dict_capacity).init();
-                nconf.toDictionary(&dict) catch {};
-                const ids = [2]u64{ self._id, 0 };
-                put_fn(
-                    self._callbacks.ctx,
-                    t_ptr,
-                    c_api.ZT_STATE_OBJECT_NETWORK_CONFIG,
-                    ids,
-                    @as([*]const u8, dict.data()),
-                    @intCast(dict.sizeBytes()),
-                );
+                if (nconf.toDictionary(&dict)) {
+                    const ids = [2]u64{ self._id, 0 };
+                    put_fn(
+                        self._callbacks.ctx,
+                        t_ptr,
+                        c_api.ZT_STATE_OBJECT_NETWORK_CONFIG,
+                        ids,
+                        @as([*]const u8, dict.data()),
+                        @intCast(dict.sizeBytes()),
+                    );
+                } else |_| {
+                    std.debug.print("  ⚠ Failed to serialize network config {x}\n", .{self._id});
+                }
             }
         }
 

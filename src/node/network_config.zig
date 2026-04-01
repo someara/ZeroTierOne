@@ -827,7 +827,9 @@ pub const NetworkConfig = struct {
             if (dns_data.len > 0) {
                 var dns_buf = Buffer(dict_capacity){};
                 dns_buf.appendBytes(dns_data) catch return false;
-                _ = dns_mod.deserializeDNS(dict_capacity, &dns_buf, 0, &self.dns_conf) catch {};
+                _ = dns_mod.deserializeDNS(dict_capacity, &dns_buf, 0, &self.dns_conf) catch {
+                    // DNS config malformed — continue with default (zeros)
+                };
             }
         }
 
