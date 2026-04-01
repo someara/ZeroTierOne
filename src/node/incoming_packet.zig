@@ -1886,6 +1886,7 @@ pub const IncomingPacket = struct {
         const gather_off = packet.multicast_gather_ok_idx.idx_gather_results;
         const total_known = self.pkt.buf.at(u32, gather_off) catch return nwid;
         const count = self.pkt.buf.at(u16, gather_off + 4) catch return nwid;
+        if (count > 2000) return nwid; // Prevent u32 overflow (2000*5=10000 < max_packet_length)
         const addresses_data = self.pkt.buf.field(gather_off + 6, @as(u32, count) * 5) catch return nwid;
 
         cb.multicasterAddMultiple(
@@ -1926,6 +1927,7 @@ pub const IncomingPacket = struct {
             offset += 4;
             const count = self.pkt.buf.at(u16, offset) catch return nwid;
             offset += 2;
+            if (count > 2000) return nwid; // Prevent u32 overflow
             const addresses_data = self.pkt.buf.field(offset, @as(u32, count) * 5) catch return nwid;
             const mac_data = self.pkt.buf.field(packet.multicast_frame_ok_idx.idx_mac, 6) catch return nwid;
             const adi = self.pkt.buf.at(u32, packet.multicast_frame_ok_idx.idx_adi) catch return nwid;
@@ -1988,7 +1990,9 @@ pub const IncomingPacket = struct {
             // Look up the identity.
             if (cb.topologyGetIdentity(cb.ctx, cb.tptr, addr.toInt())) |id| {
                 // Serialize this identity into the OK response.
-                id.serialize(packet.max_packet_length, &outp.buf, false) catch {};
+                id.serialize(packet.max_packet_length, &outp.buf, false) catch {
+                    break; // Buffer full — send what we have
+                };
                 count += 1;
             } else {
                 // Request it from our upstream.

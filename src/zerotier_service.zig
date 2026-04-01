@@ -138,7 +138,16 @@ pub const Service = struct {
         std.debug.print("Shutting down service...\n", .{});
         if (self.http_api) |api| api.stop();
         if (self.tun) |*tun| tun.close();
+
+        // Close all sockets before freeing tracking structures
+        for (self.secondary_socks.items) |sock| {
+            self.phy.close(sock, false);
+        }
         self.secondary_socks.deinit(self.allocator);
+        if (self.primary_sock) |sock| {
+            self.phy.close(sock, false);
+        }
+
         self.node.deinit();
         self.phy.deinit();
         if (self.auth_token) |t| self.allocator.free(t);
@@ -327,7 +336,7 @@ pub const Service = struct {
         const bind_addr_v6 = net.Address.initIp6([16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, self.primary_port, 0, 0);
         if (self.phy.udpBind(bind_addr_v6, self, 0)) |v6_sock| {
             self.secondary_socks.append(self.allocator, v6_sock) catch {
-                self.phy.udpClose(v6_sock);
+                self.phy.close(v6_sock, false);
                 std.debug.print("  ⚠ IPv6 socket bound but tracking failed (closed)\n", .{});
                 return;
             };
