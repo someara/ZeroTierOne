@@ -306,3 +306,64 @@ const HttpRequest = struct {
     path: []const u8,
     auth_token: []const u8,
 };
+
+// ── Tests ─────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+test "parseRequest: valid GET" {
+    const req = HttpApi.parseRequest("GET /status HTTP/1.1\r\nHost: localhost\r\n\r\n").?;
+    try testing.expectEqual(HttpMethod.GET, req.method);
+    try testing.expectEqualStrings("/status", req.path);
+    try testing.expectEqualStrings("", req.auth_token);
+}
+
+test "parseRequest: valid POST with auth" {
+    const req = HttpApi.parseRequest("POST /network/1234567890abcdef HTTP/1.1\r\nX-ZT1-Auth: mysecret\r\n\r\n").?;
+    try testing.expectEqual(HttpMethod.POST, req.method);
+    try testing.expectEqualStrings("/network/1234567890abcdef", req.path);
+    try testing.expectEqualStrings("mysecret", req.auth_token);
+}
+
+test "parseRequest: valid DELETE" {
+    const req = HttpApi.parseRequest("DELETE /network/1234567890abcdef HTTP/1.1\r\n\r\n").?;
+    try testing.expectEqual(HttpMethod.DELETE, req.method);
+}
+
+test "parseRequest: lowercase auth header" {
+    const req = HttpApi.parseRequest("GET /status HTTP/1.1\r\nx-zt1-auth: tok123\r\n\r\n").?;
+    try testing.expectEqualStrings("tok123", req.auth_token);
+}
+
+test "parseRequest: rejects unknown method" {
+    try testing.expect(HttpApi.parseRequest("PATCH /status HTTP/1.1\r\n\r\n") == null);
+    try testing.expect(HttpApi.parseRequest("PUT /status HTTP/1.1\r\n\r\n") == null);
+}
+
+test "parseRequest: rejects empty input" {
+    try testing.expect(HttpApi.parseRequest("") == null);
+}
+
+test "parseRequest: rejects no CRLF" {
+    try testing.expect(HttpApi.parseRequest("GET /status HTTP/1.1") == null);
+}
+
+test "parseRequest: rejects missing path" {
+    try testing.expect(HttpApi.parseRequest("GET\r\n\r\n") == null);
+}
+
+test "parseRequest: handles request with no headers" {
+    const req = HttpApi.parseRequest("GET /status HTTP/1.1\r\n\r\n").?;
+    try testing.expectEqual(HttpMethod.GET, req.method);
+    try testing.expectEqualStrings("/status", req.path);
+}
+
+test "parseRequest: auth token with empty value" {
+    const req = HttpApi.parseRequest("GET / HTTP/1.1\r\nX-ZT1-Auth: \r\n\r\n").?;
+    try testing.expectEqualStrings("", req.auth_token);
+}
+
+test "parseRequest: multiple headers preserves last auth" {
+    const req = HttpApi.parseRequest("GET / HTTP/1.1\r\nX-ZT1-Auth: first\r\nX-ZT1-Auth: second\r\n\r\n").?;
+    try testing.expectEqualStrings("second", req.auth_token);
+}
