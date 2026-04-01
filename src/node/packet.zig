@@ -819,7 +819,7 @@ pub const Packet = struct {
         const payload_start = idx_verb;
         const payload_len = self.buf.size() - payload_start;
 
-        // Generate Poly1305 MAC key.
+        // Generate Poly1305 MAC key (first 32 bytes of Salsa20 keystream).
         var s20 = Salsa20.init(&mangled_key, pkt_data[idx_iv..][0..8]);
         var mac_key: [32]u8 = undefined;
         s20.crypt12(&mac_key, &zero_key);
@@ -836,10 +836,10 @@ pub const Packet = struct {
 
         // Decrypt if cipher suite 1.
         if (cs == .c25519_poly1305_salsa2012) {
-            // Skip remainder of first Salsa20 block (32 bytes used for MAC key).
-            var skip_buf: [32]u8 = undefined;
-            s20.crypt12(&skip_buf, &([_]u8{0} ** 32));
-
+            // Decrypt payload starting from byte 64 of keystream (after MAC key).
+            // Note: crypt12() with 32-byte input consumes one full 64-byte Salsa20 block
+            // and advances the block counter to 1. We're now positioned at byte 64 of
+            // the keystream, which matches C++ behavior (keyStream + 8 uint64_t* = +64 bytes).
             const payload = pkt_data[payload_start..][0..payload_len];
             s20.crypt12(payload, payload);
         }
