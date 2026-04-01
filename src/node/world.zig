@@ -286,7 +286,10 @@ pub const World = struct {
 
         if (self._type == .moon) {
             const dict_len = try buf.at(u16, p);
-            p += @as(u32, dict_len) + 2;
+            p += 2;
+            // §4.6: Validate length-delimited field fits in buffer
+            _ = try buf.field(p, dict_len);
+            p += dict_len;
         }
 
         return p - start_at;

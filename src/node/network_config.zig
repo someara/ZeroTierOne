@@ -710,6 +710,7 @@ pub const NetworkConfig = struct {
                 var p: u32 = 0;
                 while (p < cap_buf.size() and self.capability_count < max_network_capabilities) {
                     const result = Capability.deserialize(dict_capacity, &cap_buf, p) catch break;
+                    if (result.bytes_read == 0) break; // §4.7: prevent infinite loop on zero-length record
                     self.capabilities[self.capability_count] = result.capability;
                     self.capability_count += 1;
                     p += result.bytes_read;
@@ -727,6 +728,7 @@ pub const NetworkConfig = struct {
                 var p: u32 = 0;
                 while (p < tag_buf.size() and self.tag_count < max_network_tags) {
                     const result = Tag.deserialize(dict_capacity, &tag_buf, p) catch break;
+                    if (result.bytes_read == 0) break; // §4.7: prevent infinite loop on zero-length record
                     self.tags[self.tag_count] = result.tag;
                     self.tag_count += 1;
                     p += result.bytes_read;
@@ -744,6 +746,7 @@ pub const NetworkConfig = struct {
                 var p: u32 = 0;
                 while (p < coo_buf.size()) {
                     const result = CertificateOfOwnership.deserialize(dict_capacity, &coo_buf, p) catch break;
+                    if (result.bytes_read == 0) break; // §4.7: prevent infinite loop on zero-length record
                     if (self.certificate_of_ownership_count < max_certificates_of_ownership) {
                         self.certificates_of_ownership[self.certificate_of_ownership_count] = result.coo;
                         self.certificate_of_ownership_count += 1;
