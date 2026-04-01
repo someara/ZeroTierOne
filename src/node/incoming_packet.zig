@@ -1974,9 +1974,14 @@ pub const IncomingPacket = struct {
         while (ptr + constants.address_length <= pkt_size) {
             var addr_bytes: [constants.address_length]u8 = undefined;
             var i: u32 = 0;
+            var parse_ok = true;
             while (i < constants.address_length) : (i += 1) {
-                addr_bytes[i] = self.pkt.buf.at(u8, ptr + i) catch break;
+                addr_bytes[i] = self.pkt.buf.at(u8, ptr + i) catch {
+                    parse_ok = false;
+                    break;
+                };
             }
+            if (!parse_ok) break; // Malformed packet — stop parsing
             const addr = Address.fromBytes(&addr_bytes);
             ptr += constants.address_length;
 
@@ -2033,9 +2038,14 @@ pub const IncomingPacket = struct {
             // Parse the ZT address to contact.
             var with_bytes: [constants.address_length]u8 = undefined;
             var i: u32 = 0;
+            var addr_ok = true;
             while (i < constants.address_length) : (i += 1) {
-                with_bytes[i] = self.pkt.buf.at(u8, packet.rendezvous_idx.idx_zt_address + i) catch break;
+                with_bytes[i] = self.pkt.buf.at(u8, packet.rendezvous_idx.idx_zt_address + i) catch {
+                    addr_ok = false;
+                    break;
+                };
             }
+            if (!addr_ok) return true; // Malformed RENDEZVOUS
             const with_addr = Address.fromBytes(&with_bytes);
 
             // Look up the peer we should rendezvous with.

@@ -194,7 +194,9 @@ pub const Service = struct {
             const path = std.fmt.bufPrint(&path_buf, "{s}/authtoken.secret", .{dir}) catch return result;
             const file = std.fs.createFileAbsolute(path, .{}) catch return result;
             defer file.close();
-            file.writeAll(result) catch {};
+            file.writeAll(result) catch |err| {
+                std.debug.print("  ⚠ Failed to write auth token: {}\n", .{err});
+            };
             std.debug.print("  ✓ Auth token written to {s}\n", .{path});
         }
 
@@ -324,7 +326,11 @@ pub const Service = struct {
         // Bind IPv6 socket
         const bind_addr_v6 = net.Address.initIp6([16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, self.primary_port, 0, 0);
         if (self.phy.udpBind(bind_addr_v6, self, 0)) |v6_sock| {
-            self.secondary_socks.append(self.allocator, v6_sock) catch {};
+            self.secondary_socks.append(self.allocator, v6_sock) catch {
+                self.phy.udpClose(v6_sock);
+                std.debug.print("  ⚠ IPv6 socket bound but tracking failed (closed)\n", .{});
+                return;
+            };
             std.debug.print("  ✓ IPv6 socket bound\n", .{});
         } else |_| {
             std.debug.print("  ⚠ IPv6 socket bind failed (continuing with IPv4 only)\n", .{});
