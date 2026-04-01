@@ -437,7 +437,10 @@ pub const Switch = struct {
             }
 
             const entry = TXQueueEntry.init(dest, nwid, @intCast(now), packet.*, encrypt, flow_id);
-            self.tx_queue.append(self.allocator, entry) catch return;
+            self.tx_queue.append(self.allocator, entry) catch {
+                std.debug.print("[switch] TX queue append failed (OOM), packet dropped\n", .{});
+                return;
+            };
 
             // Request WHOIS if we don't know this peer
             if (callbacks.lookupPeer(t_ptr, dest) == null) {
@@ -484,7 +487,10 @@ pub const Switch = struct {
         // We broadcast it because we don't know which peer can answer
         if (callbacks.sendWhoisRequest(callbacks.ctx, t_ptr, &whois_pkt, now)) {
             // Record this request
-            self.last_sent_whois_request.set(addr, now) catch {};
+            self.last_sent_whois_request.set(addr, now) catch {
+                // Rate-limit tracking failed (OOM) — WHOIS was sent but
+                // may be re-sent sooner than intended. Non-critical.
+            };
         }
     }
 

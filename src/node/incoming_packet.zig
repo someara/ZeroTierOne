@@ -2172,6 +2172,7 @@ pub const IncomingPacket = struct {
                         nwid,
                     );
                     const dest_mac = cb.networkMac(cb.ctx, network);
+                    if (pkt_size <= packet.frame_idx.idx_frame_payload) return true; // malformed
                     const frame_len = pkt_size - packet.frame_idx.idx_frame_payload;
                     const frame_data = self.pkt.buf.data()[packet.frame_idx.idx_frame_payload..];
 
