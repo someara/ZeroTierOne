@@ -494,6 +494,15 @@ in this document and CODING_STANDARDS.md. Never skip the audit to
 "save time" — the bugs found in audit are cheaper to fix now than
 after they've been built upon.
 
+Fix every issue found during audit, regardless of severity. Do not
+defer LOW-severity issues — they accumulate and create a false sense
+of completion. An issue noted but not fixed is technical debt with
+interest.
+
+Every bug fix must include a regression test that would fail if the
+bug were reintroduced. A fix without a test is incomplete — the bug
+will come back the next time someone refactors near it.
+
 ### 9.7 TDD for ported code
 
 When porting code from another implementation, convert the original
