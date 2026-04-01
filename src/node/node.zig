@@ -119,9 +119,11 @@ pub const Node = struct {
 
         // Initialize Switch
         const switch_engine = try allocator.create(Switch);
-        errdefer allocator.destroy(switch_engine);
-
         switch_engine.* = try Switch.init(allocator);
+        errdefer {
+            switch_engine.deinit();
+            allocator.destroy(switch_engine);
+        }
 
         // Initialize Topology
         const topology = try allocator.create(Topology);
@@ -346,6 +348,7 @@ pub const Node = struct {
                         .wireSendFn = self.callbacks.wireSend,
                         .expectReplyFn = null, // Node calls expectReplyTo separately
                         .wire_ctx = self.callbacks.ctx,
+                        .expect_ctx = null, // Not tracking expected replies here
                         .t_ptr = t_ptr,
                     };
 
@@ -460,8 +463,6 @@ pub const Node = struct {
         }
 
         const network = try self.allocator.create(Network);
-        errdefer self.allocator.destroy(network);
-
         network.* = Network.init(
             self.allocator,
             nwid,
@@ -469,6 +470,10 @@ pub const Node = struct {
             self.user_ptr,
             self.createNetworkCallbacks(),
         );
+        errdefer {
+            network.deinit();
+            self.allocator.destroy(network);
+        }
         try self.networks.put(nwid, network);
 
         return network;

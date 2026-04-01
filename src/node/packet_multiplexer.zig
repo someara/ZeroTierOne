@@ -343,6 +343,12 @@ pub const PacketMultiplexer = struct {
         }
     }
 
+    /// Acquire a PacketRecord from the pool, or allocate a new one.
+    /// Returns null if allocation fails (OutOfMemory).
+    ///
+    /// LIMITATION: OutOfMemory cannot be propagated (return type is ?*PacketRecord).
+    /// Consequence: Packet is silently dropped under memory pressure. This is acceptable
+    /// for best-effort UDP packet processing - dropped packets will be retransmitted.
     fn acquireRecord(self: *PacketMultiplexer) ?*PacketRecord {
         self.pool_mutex.lock();
         defer self.pool_mutex.unlock();
@@ -353,6 +359,7 @@ pub const PacketMultiplexer = struct {
         }
 
         // Pool empty — allocate a new record.
+        // NOTE: OOM is converted to null, causing silent packet drop (see doc comment).
         return self.allocator.create(PacketRecord) catch return null;
     }
 

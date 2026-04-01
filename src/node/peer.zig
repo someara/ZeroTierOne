@@ -1011,6 +1011,7 @@ pub const Peer = struct {
         wireSendFn: *const fn (?*anyopaque, ?*anyopaque, i64, *const InetAddress, [*]const u8, u32, i32) void,
         expectReplyFn: ?*const fn (?*anyopaque, u64) void,
         wire_ctx: ?*anyopaque,
+        expect_ctx: ?*anyopaque,
         t_ptr: ?*anyopaque,
     };
 
@@ -1050,9 +1051,9 @@ pub const Peer = struct {
         // Armor with MAC only (encrypt=false), matching C++ armor(_key, false, ...)
         outp.armor(&self._key[0..32].*, false, false, null, null);
 
-        // Track expected reply
+        // Track expected reply so doOK() accepts the response
         if (ctx.expectReplyFn) |expectFn| {
-            expectFn(ctx.wire_ctx, outp.packetId());
+            expectFn(ctx.expect_ctx, outp.packetId());
         }
 
         // Send

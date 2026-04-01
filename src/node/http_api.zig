@@ -25,6 +25,8 @@ pub const HttpApi = struct {
     server: net.Server,
     thread: ?std.Thread,
     node: *Node,
+    /// BORROWED: Pointer to auth token string owned by caller.
+    /// Must remain valid for the lifetime of this HttpApi instance.
     auth_token: []const u8,
     running: std.atomic.Value(bool),
 
@@ -40,6 +42,7 @@ pub const HttpApi = struct {
         });
 
         const self = try allocator.create(HttpApi);
+        errdefer allocator.destroy(self); // Clean up if thread spawn fails
         self.* = .{
             .allocator = allocator,
             .server = server,
