@@ -571,11 +571,14 @@ pub const Packet = struct {
         // Flags with hops masked off (bits FFCCC000).
         out[18] = in_key[18] ^ (d[idx_flags] & 0xf8);
 
-        // Packet size as little-endian u16.
-        // Note: ZeroTier protocol limits packets to 16-bit size (max 65535 bytes).
-        // Current max_packet_length (10024) is well under this limit.
+        // Packet size as little-endian u16 (protocol-mandated truncation).
+        // Verify protocol constraint at compile time.
+        comptime {
+            if (max_packet_length > 0xFFFF) {
+                @compileError("max_packet_length exceeds protocol limit of 65535 bytes");
+            }
+        }
         const sz = self.buf.size();
-        std.debug.assert(sz <= 0xFFFF); // Protocol constraint
         out[19] = in_key[19] ^ @as(u8, @truncate(sz & 0xff));
         out[20] = in_key[20] ^ @as(u8, @truncate((sz >> 8) & 0xff));
 

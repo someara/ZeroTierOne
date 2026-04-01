@@ -1863,6 +1863,9 @@ pub const IncomingPacket = struct {
         const nwid = self.pkt.buf.at(u64, packet.ok_idx.idx_ok_payload) catch return 0;
         const nw = cb.nodeGetNetwork(cb.ctx, nwid) orelse return nwid;
 
+        // Validate packet is large enough to have payload (prevent integer underflow)
+        if (self.pkt.buf.size() < packet.ok_idx.idx_ok_payload) return nwid;
+
         // Pass the entire payload starting at idx_ok_payload to the
         // network's config chunk handler.
         const payload_len = self.pkt.buf.size() - packet.ok_idx.idx_ok_payload;
