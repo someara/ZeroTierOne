@@ -167,7 +167,6 @@ These features would improve production usability but **are not required for bas
 
 1. **IPv6 TUN packets** — Currently logged but not processed
 2. **Multi-network TUN mapping** — Uses "first network" for all TUN traffic
-3. **NEON SIMD disabled** — Scalar crypto only (bug in Salsa20/20 NEON path)
 
 ---
 

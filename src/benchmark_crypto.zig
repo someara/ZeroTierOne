@@ -269,7 +269,7 @@ fn testAndBenchmarkCrypto(allocator: std.mem.Allocator) !void {
     }
     std.debug.print("PASS\n", .{});
 
-    std.debug.print("[crypto] Salsa20 SSE: DISABLED\n", .{});
+    std.debug.print("[crypto] Salsa20 NEON: {s}\n", .{if (builtin.cpu.arch == .aarch64) "ENABLED" else "DISABLED"});
     std.debug.print("[crypto] Hardware AES acceleration: {s}\n", .{if (@import("node/aes.zig").has_hardware_support) "ENABLED" else "DISABLED"});
 
     // Benchmark Salsa20/12

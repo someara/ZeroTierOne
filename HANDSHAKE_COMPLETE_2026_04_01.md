@@ -153,8 +153,8 @@ All cryptographic operations verified correct:
 ## Known Limitations
 
 ### Current Implementation
-- **SIMD crypto disabled**: Using scalar Salsa20 (bug in NEON implementation)
-- **macOS only**: TUN device implementation incomplete for Linux
+- **NEON crypto enabled**: ARM64 SIMD optimizations active (Salsa20, Poly1305)
+- **Cross-platform**: macOS and Linux TUN device implementations complete
 - **Basic functionality**: Advanced features (moons, custom configs) not yet tested
 
 ### Not Blocking
