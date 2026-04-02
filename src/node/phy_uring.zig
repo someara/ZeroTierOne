@@ -444,43 +444,63 @@ pub const PhyUring = struct {
         return @ptrCast(socket_impl);
     }
 
-    /// Create TCP listening socket
+    /// BUG #44: TCP methods not implemented (UDP-only backend)
+    ///
+    /// ZeroTier protocol is primarily UDP-based. TCP support would require:
+    /// - IORING_OP_ACCEPT for tcpListen
+    /// - IORING_OP_CONNECT for tcpConnect
+    /// - IORING_OP_SEND/RECV for stream I/O
+    /// - Connection state tracking
+    /// - Backpressure handling for setNotifyWritable
+    ///
+    /// Status: Deferred - not needed for core ZeroTier VPN functionality
+
+    /// Create TCP listening socket (NOT IMPLEMENTED)
     pub fn tcpListen(
         self: *PhyUring,
         local_addr: net.Address,
         uptr: ?*anyopaque,
     ) !*PhySocket {
-        // TODO: Create TCP listening socket
         _ = self;
         _ = local_addr;
         _ = uptr;
-        return error.NotImplementedYet;
+        return error.TcpNotSupported;
     }
 
-    /// Initiate TCP connection (non-blocking)
+    /// Initiate TCP connection (NOT IMPLEMENTED)
     pub fn tcpConnect(
         self: *PhyUring,
         remote_addr: net.Address,
         uptr: ?*anyopaque,
     ) !*PhySocket {
-        // TODO: Create TCP socket and initiate connection
         _ = self;
         _ = remote_addr;
         _ = uptr;
-        return error.NotImplementedYet;
+        return error.TcpNotSupported;
     }
 
-    /// Send TCP data (non-blocking)
+    /// Send TCP data (NOT IMPLEMENTED)
     pub fn tcpSend(
         self: *PhyUring,
         sock: *PhySocket,
         data: []const u8,
     ) !void {
-        // TODO: Implement TCP send via IORING_OP_SEND
         _ = self;
         _ = sock;
         _ = data;
-        return error.NotImplementedYet;
+        return error.TcpNotSupported;
+    }
+
+    /// Set TCP write notification (NOT IMPLEMENTED)
+    pub fn setNotifyWritable(
+        self: *PhyUring,
+        sock: *PhySocket,
+        notify: bool,
+    ) void {
+        _ = self;
+        _ = sock;
+        _ = notify;
+        // No-op for UDP-only backend
     }
 
     /// Close socket
