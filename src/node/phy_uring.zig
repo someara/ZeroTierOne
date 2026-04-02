@@ -32,6 +32,7 @@ const IoUring = linux.IoUring;
 
 /// Pre-allocated buffer pool for receive operations
 /// Using a ring buffer approach to recycle buffers efficiently
+/// Thread-safe: All operations protected by mutex
 const BufferPool = struct {
     const BUFFER_SIZE = 2048; // Size for each receive buffer
     const BUFFER_COUNT = 256; // Number of pre-allocated buffers
@@ -39,6 +40,7 @@ const BufferPool = struct {
     buffers: []align(std.mem.page_size) [BUFFER_SIZE]u8,
     free_list: std.ArrayList(usize), // Indices of free buffers
     allocator: Allocator,
+    lock: std.Thread.Mutex,
 
     fn init(allocator: Allocator) !BufferPool {
         const buffers = try allocator.alignedAlloc(
@@ -60,6 +62,7 @@ const BufferPool = struct {
             .buffers = buffers,
             .free_list = free_list,
             .allocator = allocator,
+            .lock = .{},
         };
     }
 
@@ -69,7 +72,11 @@ const BufferPool = struct {
     }
 
     /// Get a free buffer, returns null if all buffers are in use
+    /// Thread-safe: Protected by mutex
     fn acquire(self: *BufferPool) ?struct { index: usize, buffer: []u8 } {
+        self.lock.lock();
+        defer self.lock.unlock();
+
         if (self.free_list.items.len == 0) return null;
         const index = self.free_list.pop();
         return .{
@@ -79,8 +86,13 @@ const BufferPool = struct {
     }
 
     /// Return a buffer to the pool
+    /// Thread-safe: Protected by mutex
     fn release(self: *BufferPool, index: usize) void {
         std.debug.assert(index < BUFFER_COUNT);
+
+        self.lock.lock();
+        defer self.lock.unlock();
+
         self.free_list.append(index) catch {
             // If append fails, we just lose the buffer (shouldn't happen)
             std.debug.print("phy_uring: WARNING: failed to return buffer to pool\n", .{});
@@ -124,6 +136,7 @@ const OpContext = struct {
 // ── Main PhyUring Structure ────────────────────────────────────────────
 
 /// io_uring-based physical layer I/O manager
+/// Thread-safe: sockets and op_contexts protected by mutex
 pub const PhyUring = struct {
     allocator: Allocator,
     handler: PhyHandler,
@@ -134,6 +147,9 @@ pub const PhyUring = struct {
 
     // Wake-up eventfd for interrupting from another thread
     wakeup_fd: posix.fd_t,
+
+    // Thread safety (STYLE.md Rule 8.2: Lock discipline)
+    state_lock: std.Thread.Mutex, // Protects sockets and op_contexts
 
     // Configuration
     no_delay: bool, // TCP_NODELAY
@@ -173,6 +189,7 @@ pub const PhyUring = struct {
             .buffer_pool = buffer_pool,
             .op_contexts = std.ArrayList(*OpContext).init(allocator),
             .wakeup_fd = wakeup_fd,
+            .state_lock = .{},
             .no_delay = no_delay,
             .no_check = no_check,
         };
@@ -288,12 +305,14 @@ pub const PhyUring = struct {
             .data_copy = data_copy,
         };
 
-        try self.op_contexts.append(ctx);
-        errdefer _ = self.op_contexts.pop();
-
-        // Submit sendmsg operation
+        // Submit sendmsg operation first (before adding to list)
         const user_data = @intFromPtr(ctx);
         _ = try self.ring.sendmsg(user_data, socket_impl.socket, msg, 0);
+
+        // Add to list after successful submission
+        self.state_lock.lock();
+        defer self.state_lock.unlock();
+        try self.op_contexts.append(ctx);
     }
 
     /// Bind UDP socket to local address
@@ -343,10 +362,13 @@ pub const PhyUring = struct {
             .remote_addr = local_addr,
         };
 
-        try self.sockets.append(socket_impl);
-
-        // Submit initial receive operation
+        // Submit initial receive operation first
         try self.submitUdpRecv(socket_impl);
+
+        // Add to sockets list after successful setup
+        self.state_lock.lock();
+        defer self.state_lock.unlock();
+        try self.sockets.append(socket_impl);
 
         return @ptrCast(socket_impl);
     }
@@ -391,6 +413,7 @@ pub const PhyUring = struct {
     }
 
     /// Close socket
+    /// Thread-safe: Protected by state_lock
     pub fn close(self: *PhyUring, sock: *PhySocket) void {
         const socket_impl: *PhySocketImpl = @ptrCast(@alignCast(sock));
 
@@ -400,6 +423,9 @@ pub const PhyUring = struct {
             socket_impl.socket = -1;
         }
 
+        self.state_lock.lock();
+        defer self.state_lock.unlock();
+
         // Remove from socket list
         for (self.sockets.items, 0..) |item, i| {
             if (item == socket_impl) {
@@ -408,11 +434,11 @@ pub const PhyUring = struct {
             }
         }
 
-        // Cancel any pending operations for this socket
-        // Note: We leave them in op_contexts - they'll be cleaned up
-        // when completions arrive (with error status)
+        // TODO BUG #30: Should cancel pending operations with IORING_OP_ASYNC_CANCEL
+        // For now, pending operations will complete with -ECANCELED
+        // They reference freed socket (BUG #17/#28/#31) - needs refcounting
 
-        // Free socket
+        // Free socket (UNSAFE if operations pending - see BUG #17/#28/#31)
         self.allocator.destroy(socket_impl);
     }
 
@@ -469,12 +495,14 @@ pub const PhyUring = struct {
             .data_copy = null,
         };
 
-        try self.op_contexts.append(ctx);
-        errdefer _ = self.op_contexts.pop();
-
-        // Submit recvmsg operation
+        // Submit recvmsg operation first (before adding to list)
         const user_data = @intFromPtr(ctx);
         _ = try self.ring.recvmsg(user_data, socket.socket, msg, 0);
+
+        // Add to list after successful submission
+        self.state_lock.lock();
+        defer self.state_lock.unlock();
+        try self.op_contexts.append(ctx);
     }
 
     /// Process a completion queue entry
@@ -550,7 +578,10 @@ pub const PhyUring = struct {
         if (ctx.dest_addr) |addr| self.allocator.destroy(addr);
         if (ctx.data_copy) |data| self.allocator.free(data);
 
-        // Remove from list
+        // Remove from list (thread-safe)
+        self.state_lock.lock();
+        defer self.state_lock.unlock();
+
         for (self.op_contexts.items, 0..) |item, i| {
             if (item == ctx) {
                 _ = self.op_contexts.swapRemove(i);
