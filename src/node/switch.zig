@@ -59,6 +59,15 @@ const aqm_quantum: i32 = 1500;
 /// No QoS flow ID sentinel
 pub const qos_no_flow: i32 = -1;
 
+// ── Timestamp Safety Utilities ───────────────────────────────────
+
+/// Calculate safe age (time elapsed since timestamp).
+/// Returns 0 if timestamp is in the future to prevent underflow/wraparound.
+/// BUG FIX #4: Prevents timestamp underflow vulnerability.
+inline fn safeAge(now: i64, timestamp: i64) i64 {
+    return if (now > timestamp) now - timestamp else 0;
+}
+
 // ── RX Queue Entry ───────────────────────────────────────────────
 
 /// Stored fragment data
@@ -243,7 +252,8 @@ pub const Switch = struct {
 
     // Timestamps
     last_beacon_response: i64,
-    last_checked_queues: i64,
+    // BUG FIX #5: Make atomic to prevent data race
+    last_checked_queues: std.atomic.Value(i64),
 
     // WHOIS tracking
     last_sent_whois_request: Hashtable(Address, i64),
@@ -277,7 +287,7 @@ pub const Switch = struct {
         return .{
             .allocator = allocator,
             .last_beacon_response = 0,
-            .last_checked_queues = 0,
+            .last_checked_queues = std.atomic.Value(i64).init(0),
             .last_sent_whois_request = Hashtable(Address, i64).init(allocator),
             .last_sent_whois_request_mutex = .{},
             .rx_queue = rx_queue,
@@ -526,7 +536,7 @@ pub const Switch = struct {
             rq.lock.lock();
             defer rq.lock.unlock();
             if (rq.timestamp != 0 and rq.complete) {
-                if (rq.frag0.tryDecode(callbacks, rq.flow_id) or (now - rq.timestamp) > constants.receive_queue_timeout) {
+                if (rq.frag0.tryDecode(callbacks, rq.flow_id) or safeAge(now, rq.timestamp) > constants.receive_queue_timeout) {
                     rq.timestamp = 0;
                 }
             }
@@ -560,11 +570,11 @@ pub const Switch = struct {
         now: i64,
         callbacks: *const Callbacks,
     ) u64 {
-        const time_since_last_check = now - self.last_checked_queues;
+        const time_since_last_check = safeAge(now, self.last_checked_queues.load(.monotonic));
         if (time_since_last_check < constants.whois_retry_delay) {
             return @intCast(constants.whois_retry_delay - time_since_last_check);
         }
-        self.last_checked_queues = now;
+        self.last_checked_queues.store(now, .monotonic);
 
         // Try to send queued packets
         // Use fixed-size array instead of ArrayList for better performance
@@ -582,7 +592,7 @@ pub const Switch = struct {
                 if (self.trySend(t_ptr, &pkt, entry.encrypt, 0, entry.flow_id, now, callbacks)) {
                     _ = self.tx_queue.orderedRemove(i);
                     continue;
-                } else if ((now - @as(i64, @intCast(entry.creation_time))) > constants.transmit_queue_timeout) {
+                } else if (safeAge(now, @as(i64, @intCast(entry.creation_time))) > constants.transmit_queue_timeout) {
                     _ = self.tx_queue.orderedRemove(i);
                     continue;
                 } else {
@@ -610,7 +620,7 @@ pub const Switch = struct {
             if (rq.timestamp != 0 and rq.complete) {
                 // Temporarily disabled due to callback type mismatch
                 // Fragment reassembly will be re-enabled after fixing callback conversion
-                if ((now - rq.timestamp) > constants.receive_queue_timeout) {
+                if (safeAge(now, rq.timestamp) > constants.receive_queue_timeout) {
                     rq.timestamp = 0;
                 }
                 // if (rq.frag0.tryDecode(callbacks, rq.flow_id) or (now - rq.timestamp) > constants.receive_queue_timeout) {
@@ -635,7 +645,7 @@ pub const Switch = struct {
 
             var whois_iter = self.last_sent_whois_request.iterator();
             while (whois_iter.next()) |entry| {
-                if ((now - entry.value_ptr.*) > (constants.whois_retry_delay * 2)) {
+                if (safeAge(now, entry.value_ptr.*) > (constants.whois_retry_delay * 2)) {
                     if (stale_count < stale_whois.len) {
                         stale_whois[stale_count] = entry.key_ptr.*;
                         stale_count += 1;
@@ -660,7 +670,7 @@ pub const Switch = struct {
 
             var unite_iter = self.last_unite_attempt.iterator();
             while (unite_iter.next()) |entry| {
-                if ((now - @as(i64, @intCast(entry.value_ptr.*))) >= (constants.min_unite_interval * 8)) {
+                if (safeAge(now, @as(i64, @intCast(entry.value_ptr.*))) >= (constants.min_unite_interval * 8)) {
                     if (stale_count < stale_unite.len) {
                         stale_unite[stale_count] = entry.key_ptr.*;
                         stale_count += 1;
@@ -685,7 +695,13 @@ pub const Switch = struct {
         while (k <= rx_queue_size) : (k += 1) {
             const idx: usize = @intCast(@mod((current -% k), rx_queue_size));
             const rq = &self.rx_queue[idx];
-            if (rq.packet_id == packet_id and rq.timestamp != 0) {
+
+            // BUG FIX #6: Acquire lock to safely read packet_id and timestamp
+            rq.lock.lock();
+            const matches = (rq.packet_id == packet_id and rq.timestamp != 0);
+            rq.lock.unlock();
+
+            if (matches) {
                 return rq;
             }
         }
@@ -1124,7 +1140,7 @@ test "Switch: init/deinit" {
     defer sw.deinit();
 
     try testing.expectEqual(@as(i64, 0), sw.last_beacon_response);
-    try testing.expectEqual(@as(i64, 0), sw.last_checked_queues);
+    try testing.expectEqual(@as(i64, 0), sw.last_checked_queues.load(.monotonic));
 }
 
 test "Switch: RX queue entry allocation" {

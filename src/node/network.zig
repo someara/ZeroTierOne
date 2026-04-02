@@ -1536,23 +1536,28 @@ pub const Network = struct {
         if (nconf.issued_to.toInt() != self._my_address.toInt()) return 0;
         if (nconf.network_id != self._id) return 0;
 
-        // Check for duplicate.
-        if (mem.eql(u8, mem.asBytes(&self._config), mem.asBytes(nconf))) return 1;
-
         var ec: VirtualNetworkConfig = undefined;
         var old_port_initialized: bool = undefined;
+        var is_duplicate: bool = false;
 
         {
             self._lock.lock();
             defer self._lock.unlock();
 
-            self._config = nconf.*;
-            self._last_config_update = if (self._callbacks.now) |now_fn| now_fn(self._callbacks.ctx) else 0;
-            self._netconf_failure = .none;
-            old_port_initialized = self._port_initialized;
-            self._port_initialized = true;
-            self.externalConfigInternal(&ec);
+            // BUG FIX #7: Check for duplicate UNDER LOCK to prevent TOCTOU race
+            if (mem.eql(u8, mem.asBytes(&self._config), mem.asBytes(nconf))) {
+                is_duplicate = true;
+            } else {
+                self._config = nconf.*;
+                self._last_config_update = if (self._callbacks.now) |now_fn| now_fn(self._callbacks.ctx) else 0;
+                self._netconf_failure = .none;
+                old_port_initialized = self._port_initialized;
+                self._port_initialized = true;
+                self.externalConfigInternal(&ec);
+            }
         }
+
+        if (is_duplicate) return 1;
 
         // Fire callback outside the lock.
         if (self._callbacks.configure_virtual_network_port) |cb| {

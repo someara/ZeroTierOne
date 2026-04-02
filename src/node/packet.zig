@@ -873,8 +873,12 @@ pub const Packet = struct {
     /// per packet (same keystream would be reused).
     pub fn cryptField(self: *Packet, key: *const [32]u8, start: u32, len: u32) void {
         const pkt_data = self.buf.dataMut();
-        if (pkt_data.len < start + len) return;
         if (pkt_data.len < 8) return;
+
+        // BUG FIX #8: Check for overflow before addition
+        if (start > pkt_data.len) return;
+        if (len > pkt_data.len) return;
+        if (start > pkt_data.len - len) return;
 
         // IV is the packet's first 8 bytes with the lowest 3 bits masked off.
         var iv: [8]u8 = undefined;
