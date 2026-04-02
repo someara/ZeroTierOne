@@ -96,6 +96,7 @@ const BufferPool = struct {
 // ── Operation Context ──────────────────────────────────────────────────
 
 /// Context attached to each io_uring operation via user_data
+/// OWNED: All heap-allocated fields must be freed in freeOpContext
 const OpContext = struct {
     const OpType = enum {
         recv_udp,
@@ -109,8 +110,15 @@ const OpContext = struct {
     op_type: OpType,
     socket: *PhySocketImpl,
     buffer_index: ?usize, // For recv operations
-    iov: ?posix.iovec, // For send operations
-    msg: ?posix.msghdr, // For recvmsg/sendmsg
+
+    // Heap-allocated structures for io_uring (OWNED)
+    // These must remain valid until operation completes
+    iov: ?*posix.iovec, // OWNED: heap-allocated for send operations
+    msg: ?*posix.msghdr, // OWNED: heap-allocated for recvmsg
+    msg_const: ?*posix.msghdr_const, // OWNED: heap-allocated for sendmsg
+    sender_addr: ?*posix.sockaddr_storage, // OWNED: for recvmsg sender address
+    dest_addr: ?*net.Address, // OWNED: for sendmsg destination address
+    data_copy: ?[]u8, // OWNED: for sendmsg data buffer
 };
 
 // ── Main PhyUring Structure ────────────────────────────────────────────
@@ -241,23 +249,31 @@ pub const PhyUring = struct {
         const ctx = try self.allocator.create(OpContext);
         errdefer self.allocator.destroy(ctx);
 
-        // We need to copy the data since it may not be valid when operation completes
-        // TODO: Optimize this with a send buffer pool
+        // Copy data (MUST outlive udpSend)
         const data_copy = try self.allocator.dupe(u8, data);
         errdefer self.allocator.free(data_copy);
 
-        // Setup iovec for sendmsg
-        const iov = posix.iovec{
+        // Heap-allocate iovec (MUST outlive udpSend)
+        const iov = try self.allocator.create(posix.iovec);
+        errdefer self.allocator.destroy(iov);
+        iov.* = .{
             .base = @constCast(data_copy.ptr),
             .len = data_copy.len,
         };
 
-        // Setup msghdr for sendmsg
-        var msg: posix.msghdr_const = mem.zeroes(posix.msghdr_const);
-        msg.iov = @ptrCast(&iov);
+        // Heap-allocate destination address (MUST outlive udpSend)
+        const dest_addr = try self.allocator.create(net.Address);
+        errdefer self.allocator.destroy(dest_addr);
+        dest_addr.* = to;
+
+        // Heap-allocate msghdr_const (MUST outlive udpSend)
+        const msg = try self.allocator.create(posix.msghdr_const);
+        errdefer self.allocator.destroy(msg);
+        msg.* = mem.zeroes(posix.msghdr_const);
+        msg.iov = @ptrCast(iov);
         msg.iovlen = 1;
-        msg.name = @ptrCast(@constCast(&to.any));
-        msg.namelen = to.getOsSockLen();
+        msg.name = @ptrCast(@constCast(&dest_addr.any));
+        msg.namelen = dest_addr.getOsSockLen();
 
         // Setup operation context
         ctx.* = .{
@@ -265,16 +281,19 @@ pub const PhyUring = struct {
             .socket = socket_impl,
             .buffer_index = null,
             .iov = iov,
-            .msg = @bitCast(msg),
+            .msg = null,
+            .msg_const = msg,
+            .sender_addr = null,
+            .dest_addr = dest_addr,
+            .data_copy = data_copy,
         };
 
         try self.op_contexts.append(ctx);
+        errdefer _ = self.op_contexts.pop();
 
         // Submit sendmsg operation
         const user_data = @intFromPtr(ctx);
-        _ = try self.ring.sendmsg(user_data, socket_impl.socket, &msg, 0);
-
-        // Note: data_copy will be freed in processCqe when send completes
+        _ = try self.ring.sendmsg(user_data, socket_impl.socket, msg, 0);
     }
 
     /// Bind UDP socket to local address
@@ -410,19 +429,32 @@ pub const PhyUring = struct {
     fn submitUdpRecv(self: *PhyUring, socket: *PhySocketImpl) !void {
         // Get a buffer from the pool
         const buf_info = self.buffer_pool.acquire() orelse return error.NoBuffersAvailable;
+        errdefer self.buffer_pool.release(buf_info.index);
 
         // Allocate operation context
         const ctx = try self.allocator.create(OpContext);
         errdefer self.allocator.destroy(ctx);
 
-        // Setup msghdr for recvmsg
-        var msg: posix.msghdr = mem.zeroes(posix.msghdr);
-        var iov: posix.iovec = .{
+        // Heap-allocate iovec (MUST outlive submitUdpRecv)
+        const iov = try self.allocator.create(posix.iovec);
+        errdefer self.allocator.destroy(iov);
+        iov.* = .{
             .base = buf_info.buffer.ptr,
             .len = buf_info.buffer.len,
         };
-        msg.iov = @ptrCast(&iov);
+
+        // Heap-allocate msghdr (MUST outlive submitUdpRecv)
+        const msg = try self.allocator.create(posix.msghdr);
+        errdefer self.allocator.destroy(msg);
+        msg.* = mem.zeroes(posix.msghdr);
+        msg.iov = @ptrCast(iov);
         msg.iovlen = 1;
+
+        // Heap-allocate sender address storage
+        const sender_addr = try self.allocator.create(posix.sockaddr_storage);
+        errdefer self.allocator.destroy(sender_addr);
+        msg.name = @ptrCast(sender_addr);
+        msg.namelen = @sizeOf(posix.sockaddr_storage);
 
         // Setup operation context
         ctx.* = .{
@@ -431,13 +463,18 @@ pub const PhyUring = struct {
             .buffer_index = buf_info.index,
             .iov = iov,
             .msg = msg,
+            .msg_const = null,
+            .sender_addr = sender_addr,
+            .dest_addr = null,
+            .data_copy = null,
         };
 
         try self.op_contexts.append(ctx);
+        errdefer _ = self.op_contexts.pop();
 
         // Submit recvmsg operation
         const user_data = @intFromPtr(ctx);
-        _ = try self.ring.recvmsg(user_data, socket.socket, &ctx.msg.?, 0);
+        _ = try self.ring.recvmsg(user_data, socket.socket, msg, 0);
     }
 
     /// Process a completion queue entry
@@ -468,14 +505,10 @@ pub const PhyUring = struct {
                 const buffer = self.buffer_pool.getBuffer(buf_idx);
                 const data = buffer[0..bytes_received];
 
-                // Extract source address from msghdr
-                // For UDP, we need to get the sender's address from msg_name
-                const from = if (ctx.msg) |*msg| blk: {
-                    if (msg.name) |name_ptr| {
-                        const sockaddr = @as(*posix.sockaddr, @ptrCast(@alignCast(name_ptr)));
-                        break :blk net.Address.initPosix(sockaddr);
-                    }
-                    break :blk net.Address.initIp4(.{ 0, 0, 0, 0 }, 0);
+                // Extract source address from sender_addr
+                const from = if (ctx.sender_addr) |addr_storage| blk: {
+                    const sockaddr = @as(*posix.sockaddr, @ptrCast(addr_storage));
+                    break :blk net.Address.initPosix(sockaddr);
                 } else net.Address.initIp4(.{ 0, 0, 0, 0 }, 0);
 
                 // Call handler
@@ -496,11 +529,7 @@ pub const PhyUring = struct {
                 };
             },
             .send_udp => {
-                // Send completed, free the data copy
-                if (ctx.iov) |iov| {
-                    const data_copy: []u8 = @as([*]u8, @ptrCast(iov.base))[0..iov.len];
-                    self.allocator.free(data_copy);
-                }
+                // Send completed - cleanup handled in freeOpContext
             },
             .recv_tcp, .send_tcp, .accept, .connect => {
                 // TODO: Implement TCP operations
@@ -513,6 +542,14 @@ pub const PhyUring = struct {
     }
 
     fn freeOpContext(self: *PhyUring, ctx: *OpContext) void {
+        // Free all heap-allocated structures (OWNED by OpContext)
+        if (ctx.iov) |iov| self.allocator.destroy(iov);
+        if (ctx.msg) |msg| self.allocator.destroy(msg);
+        if (ctx.msg_const) |msg_const| self.allocator.destroy(msg_const);
+        if (ctx.sender_addr) |addr| self.allocator.destroy(addr);
+        if (ctx.dest_addr) |addr| self.allocator.destroy(addr);
+        if (ctx.data_copy) |data| self.allocator.free(data);
+
         // Remove from list
         for (self.op_contexts.items, 0..) |item, i| {
             if (item == ctx) {
@@ -520,6 +557,7 @@ pub const PhyUring = struct {
                 break;
             }
         }
+
         self.allocator.destroy(ctx);
     }
 };
