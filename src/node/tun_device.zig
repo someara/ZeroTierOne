@@ -32,6 +32,8 @@ pub const TunDevice = struct {
     fd: posix.fd_t,
     name: []const u8,
     unit_number: u32,
+    is_tap: bool = false, // FreeBSD uses TAP (layer 2) instead of TUN
+    mac_address: [6]u8 = [_]u8{0} ** 6, // MAC address for TAP devices
 
     /// Open a TUN device
     ///
@@ -44,8 +46,21 @@ pub const TunDevice = struct {
             return try openMacOS(allocator, name_prefix);
         } else if (builtin.os.tag == .linux) {
             return try openLinux(allocator, name_prefix);
+        } else if (builtin.os.tag == .freebsd) {
+            // FreeBSD needs network ID for device naming, use dummy value
+            return try openFreeBSD(allocator, name_prefix, 0);
         } else {
             return error.UnsupportedPlatform;
+        }
+    }
+
+    /// Open with network ID (needed for FreeBSD device naming)
+    pub fn openWithNetworkId(allocator: Allocator, name_prefix: []const u8, network_id: u64) !TunDevice {
+        if (builtin.os.tag == .freebsd) {
+            return try openFreeBSD(allocator, name_prefix, network_id);
+        } else {
+            // Other platforms don't need network ID
+            return try open(allocator, name_prefix);
         }
     }
 
@@ -157,6 +172,85 @@ pub const TunDevice = struct {
         };
     }
 
+    /// Open a TAP device on FreeBSD using /dev/tap*
+    fn openFreeBSD(allocator: Allocator, name_prefix: []const u8, network_id: u64) !TunDevice {
+        _ = name_prefix; // FreeBSD uses zt<network_id> naming
+
+        // Search for available TAP device (tap9993-tap10120)
+        for (9993..10121) |i| {
+            const tap_name = try std.fmt.allocPrint(allocator, "tap{d}", .{i});
+            defer allocator.free(tap_name);
+
+            const dev_path = try std.fmt.allocPrint(allocator, "/dev/{s}", .{tap_name});
+            defer allocator.free(dev_path);
+
+            // Check if device already exists
+            if (posix.stat(dev_path)) |_| {
+                continue; // Already exists, try next one
+            } else |_| {
+                // Device doesn't exist, create it
+                try runCommand(allocator, &[_][]const u8{ "/sbin/ifconfig", tap_name, "create" });
+
+                // Generate device name: zt + base32(network_id)
+                const zt_name = try generateZtName(allocator, network_id);
+                defer allocator.free(zt_name);
+
+                // Rename device
+                try runCommand(allocator, &[_][]const u8{ "/sbin/ifconfig", tap_name, "name", zt_name });
+
+                // Open device
+                const fd = try posix.open(dev_path, .{ .ACCMODE = .RDWR }, 0);
+                errdefer posix.close(fd);
+
+                // Generate MAC address (locally administered)
+                var mac: [6]u8 = undefined;
+                mac[0] = 0x02; // Locally administered bit
+                mac[1] = @truncate(network_id >> 32);
+                mac[2] = @truncate(network_id >> 24);
+                mac[3] = @truncate(network_id >> 16);
+                mac[4] = @truncate(network_id >> 8);
+                mac[5] = @truncate(network_id);
+
+                // Configure device: MAC address and MTU
+                const mac_str = try std.fmt.allocPrint(
+                    allocator,
+                    "{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}",
+                    .{ mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] },
+                );
+                defer allocator.free(mac_str);
+
+                try runCommand(allocator, &[_][]const u8{
+                    "/sbin/ifconfig",
+                    zt_name,
+                    "lladdr",
+                    mac_str,
+                    "mtu",
+                    "2800",
+                    "up",
+                });
+
+                // Set non-blocking mode
+                const O_NONBLOCK: u32 = 0x0004; // O_NONBLOCK on FreeBSD
+                const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
+                _ = try posix.fcntl(fd, posix.F.SETFL, flags | O_NONBLOCK);
+
+                const name = try allocator.dupe(u8, zt_name);
+
+                std.debug.print("  ✓ FreeBSD TAP device opened: {s} (fd={d})\n", .{ name, fd });
+
+                return TunDevice{
+                    .allocator = allocator,
+                    .fd = fd,
+                    .name = name,
+                    .unit_number = @intCast(i),
+                    .is_tap = true,
+                    .mac_address = mac,
+                };
+            }
+        }
+        return error.NoTapDevicesAvailable;
+    }
+
     /// Open a TUN device on Linux using /dev/net/tun
     fn openLinux(allocator: Allocator, name_prefix: []const u8) !TunDevice {
         // Linux TUN/TAP ioctl constants (from linux/if_tun.h)
@@ -222,11 +316,34 @@ pub const TunDevice = struct {
     /// Returns the number of bytes read, or error.WouldBlock if no data available.
     ///
     /// Note: On macOS utun, the first 4 bytes are a protocol family header (uint32_t).
-    /// We skip this and return just the IP packet.
+    /// On FreeBSD TAP, the first 14 bytes are an Ethernet header.
+    /// We skip these headers and return just the IP packet.
     pub fn read(self: *TunDevice, buffer: []u8) !usize {
-        // macOS utun prepends a 4-byte protocol family header
-        // We need to read it but skip it in the returned data
-        if (builtin.os.tag == .macos) {
+        if (self.is_tap) {
+            // FreeBSD TAP device: read Ethernet frame
+            var frame_buf: [2048]u8 = undefined;
+            const n = posix.read(self.fd, &frame_buf) catch |err| {
+                if (err == error.WouldBlock) {
+                    return error.WouldBlock;
+                }
+                return err;
+            };
+
+            if (n < 14) {
+                return error.ShortRead;
+            }
+
+            // Skip 14-byte Ethernet header
+            // Bytes 0-5: dst MAC
+            // Bytes 6-11: src MAC
+            // Bytes 12-13: ethertype
+            const payload_len = n - 14;
+            @memcpy(buffer[0..payload_len], frame_buf[14..n]);
+
+            return payload_len;
+        } else if (builtin.os.tag == .macos) {
+            // macOS utun prepends a 4-byte protocol family header
+            // We need to read it but skip it in the returned data
             var header: [4]u8 = undefined;
             var iov = [_]posix.iovec{
                 .{ .base = &header, .len = 4 },
@@ -255,8 +372,43 @@ pub const TunDevice = struct {
     /// Write a packet to the TUN device
     ///
     /// On macOS, this automatically prepends the protocol family header.
+    /// On FreeBSD TAP, this automatically prepends the Ethernet header.
     pub fn write(self: *TunDevice, data: []const u8) !void {
-        if (builtin.os.tag == .macos) {
+        if (self.is_tap) {
+            // FreeBSD TAP device: add Ethernet header
+            var frame_buf: [2048]u8 = undefined;
+
+            // Construct Ethernet frame:
+            // 0-5: dst MAC (broadcast for simplicity)
+            // 6-11: src MAC (our device MAC)
+            // 12-13: ethertype (0x0800 for IPv4, 0x86DD for IPv6)
+
+            // Destination MAC: broadcast
+            @memset(frame_buf[0..6], 0xFF);
+
+            // Source MAC: our device MAC
+            @memcpy(frame_buf[6..12], &self.mac_address);
+
+            // Ethertype
+            const ethertype: u16 = if (data.len > 0 and (data[0] >> 4) == 4)
+                0x0800 // IPv4
+            else if (data.len > 0 and (data[0] >> 4) == 6)
+                0x86DD // IPv6
+            else
+                return error.InvalidPacket;
+
+            frame_buf[12] = @truncate(ethertype >> 8);
+            frame_buf[13] = @truncate(ethertype);
+
+            // Payload
+            @memcpy(frame_buf[14 .. 14 + data.len], data);
+
+            const total_len = 14 + data.len;
+            const written = try posix.write(self.fd, frame_buf[0..total_len]);
+            if (written != total_len) {
+                return error.ShortWrite;
+            }
+        } else if (builtin.os.tag == .macos) {
             // Determine protocol family from IP version
             // IPv4 = AF_INET (2), IPv6 = AF_INET6 (30 on macOS)
             const proto_family: u32 = if (data.len > 0 and (data[0] >> 4) == 4)
@@ -295,6 +447,8 @@ pub const TunDevice = struct {
             return try self.setAddressMacOS(ip, netmask);
         } else if (builtin.os.tag == .linux) {
             return try self.setAddressLinux(ip, netmask);
+        } else if (builtin.os.tag == .freebsd) {
+            return try self.setAddressFreeBSD(ip, netmask);
         } else {
             return error.UnsupportedPlatform;
         }
@@ -434,12 +588,34 @@ pub const TunDevice = struct {
         std.debug.print("  ✓ Set address: {s} netmask {s}\n", .{ ip_str, netmask_str });
     }
 
+    /// Set address on FreeBSD using ifconfig inet alias
+    fn setAddressFreeBSD(self: *TunDevice, ip: [4]u8, netmask: [4]u8) !void {
+        var ip_buf: [16]u8 = undefined;
+        const ip_str = try std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] });
+
+        // FreeBSD uses "alias" to add IPs
+        try runCommand(self.allocator, &[_][]const u8{
+            "/sbin/ifconfig",
+            self.name,
+            "inet",
+            ip_str,
+            "alias",
+        });
+
+        std.debug.print("  ✓ Set address: {s}\n", .{ip_str});
+
+        // Note: netmask is handled during initial device creation on FreeBSD
+        _ = netmask;
+    }
+
     /// Add a route through this TUN device
     pub fn addRoute(self: *TunDevice, dest: [4]u8, netmask: [4]u8) !void {
         if (builtin.os.tag == .macos) {
             return try self.addRouteMacOS(dest, netmask);
         } else if (builtin.os.tag == .linux) {
             return try self.addRouteLinux(dest, netmask);
+        } else if (builtin.os.tag == .freebsd) {
+            return try self.addRouteFreeBSD(dest, netmask);
         } else {
             return error.NotImplementedYet;
         }
@@ -519,11 +695,66 @@ pub const TunDevice = struct {
         std.debug.print("  ✓ Added route: {s}/{s} via {s}\n", .{ dest_str, netmask_str, self.name });
     }
 
+    /// Add route on FreeBSD using route command
+    fn addRouteFreeBSD(self: *TunDevice, dest: [4]u8, netmask: [4]u8) !void {
+        var dest_buf: [16]u8 = undefined;
+        var netmask_buf: [16]u8 = undefined;
+
+        const dest_str = try std.fmt.bufPrint(&dest_buf, "{d}.{d}.{d}.{d}", .{ dest[0], dest[1], dest[2], dest[3] });
+        const netmask_str = try std.fmt.bufPrint(&netmask_buf, "{d}.{d}.{d}.{d}", .{ netmask[0], netmask[1], netmask[2], netmask[3] });
+
+        try runCommand(self.allocator, &[_][]const u8{
+            "/sbin/route",
+            "add",
+            "-net",
+            dest_str,
+            "-netmask",
+            netmask_str,
+            "-interface",
+            self.name,
+        });
+
+        std.debug.print("  ✓ Added route: {s}/{s} via {s}\n", .{ dest_str, netmask_str, self.name });
+    }
+
     /// Get the device file descriptor (for select/poll)
     pub fn getFd(self: *TunDevice) posix.fd_t {
         return self.fd;
     }
 };
+
+// ── Helper Functions ───────────────────────────────────────────────────────
+
+/// Generate ZeroTier device name from network ID (base32 encoding)
+/// Format: "zt" + 13 base32 characters
+fn generateZtName(allocator: Allocator, network_id: u64) ![]u8 {
+    const base32_chars = "0123456789abcdefghijklmnopqrstuv";
+    var name = try allocator.alloc(u8, 2 + 13); // "zt" + 13 chars
+    name[0] = 'z';
+    name[1] = 't';
+
+    var shift: u6 = 60;
+    var i: usize = 2;
+    while (i < 15) : (i += 1) {
+        const idx = (network_id >> shift) & 0x1f;
+        name[i] = base32_chars[idx];
+        shift -%= 5; // Wrapping subtraction to handle underflow
+    }
+
+    return name;
+}
+
+/// Run a shell command and wait for completion
+fn runCommand(allocator: Allocator, argv: []const []const u8) !void {
+    var child = std.process.Child.init(argv, allocator);
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+
+    const result = try child.spawnAndWait();
+    if (result != .Exited or result.Exited != 0) {
+        return error.CommandFailed;
+    }
+}
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
