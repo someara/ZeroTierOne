@@ -61,6 +61,13 @@ All endpoints functional:
 - ✅ Route management via ip route
 - ✅ All 20 tests passing (Docker + ARM64)
 
+**FreeBSD**:
+- ✅ TAP devices (/dev/tap*) implemented
+- ✅ Ethernet frame handling (layer 2)
+- ✅ Device configuration via ifconfig
+- ✅ Route management via route command
+- ⏳ Awaiting testing on real FreeBSD hardware
+
 ### 4. Testing Infrastructure ✅
 
 - `test_service.sh` — macOS test suite (17 tests)
@@ -83,6 +90,7 @@ All endpoints functional:
 | **Service Layer** | ✅ 100% | 2,421 | 37 | **COMPLETE!** |
 | TUN Device (macOS) | ✅ 100% | 518 | 2 | utun working |
 | TUN Device (Linux) | ✅ 100% | 518 | 2 | /dev/net/tun working |
+| TAP Device (FreeBSD) | ✅ 100% | 518 | 0 | Implemented, untested |
 | HTTP API | ✅ 100% | 372 | 4 | All endpoints functional |
 | State Persistence | ✅ 100% | — | — | Identity, tokens, planet |
 | Event Loop | ✅ 100% | 756 | — | Packet routing (wire ↔ TUN) |
@@ -99,6 +107,7 @@ All endpoints functional:
 
 ### April 2: Service Layer Completed ✅
 - **Linux TUN device** — Full implementation (openLinux, setAddressLinux, addRouteLinux)
+- **FreeBSD TAP device** — Full implementation (openFreeBSD, Ethernet frames, layer 2)
 - **Cross-platform testing** — Docker + OrbStack infrastructure
 - **All tests passing** — 20/20 on Linux ARM64, 17/17 on macOS
 - **O_NONBLOCK fix** — Platform-specific constant handling for ARM Linux
