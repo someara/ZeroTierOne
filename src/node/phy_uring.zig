@@ -112,6 +112,9 @@ const BufferPool = struct {
 
 /// Context attached to each io_uring operation via user_data
 /// OWNED: All heap-allocated fields must be freed in freeOpContext
+///
+/// BUG #30 fix: Store socket pointer AND fd. Check fd validity before dereferencing pointer.
+/// If socket is closed, fd becomes -1, and we can detect this without dereferencing freed memory.
 const OpContext = struct {
     const OpType = enum {
         recv_udp,
@@ -123,7 +126,8 @@ const OpContext = struct {
     };
 
     op_type: OpType,
-    socket: *PhySocketImpl,
+    socket: *PhySocketImpl, // May be dangling if socket closed
+    socket_fd: posix.fd_t, // Stable copy of fd - used to detect close
     buffer_index: ?usize, // For recv operations
 
     // Heap-allocated structures for io_uring (OWNED)
@@ -318,9 +322,11 @@ pub const PhyUring = struct {
         msg.namelen = dest_addr.getOsSockLen();
 
         // Setup operation context
+        // BUG #30 fix: Store fd copy to detect socket close
         ctx.* = .{
             .op_type = .send_udp,
             .socket = socket_impl,
+            .socket_fd = socket_impl.socket,
             .buffer_index = null,
             .iov = iov,
             .msg = null,
@@ -594,9 +600,11 @@ pub const PhyUring = struct {
         msg.namelen = @sizeOf(posix.sockaddr_storage);
 
         // Setup operation context
+        // BUG #30 fix: Store fd copy to detect socket close
         ctx.* = .{
             .op_type = .recv_udp,
             .socket = socket,
+            .socket_fd = socket.socket,
             .buffer_index = buf_info.index,
             .iov = iov,
             .msg = msg,
@@ -641,6 +649,18 @@ pub const PhyUring = struct {
     fn processCqe(self: *PhyUring, cqe: *linux.io_uring_cqe) void {
         // Decode user_data to get OpContext
         const ctx = @as(*OpContext, @ptrFromInt(cqe.user_data));
+
+        // BUG #30 fix: Check if socket was closed before dereferencing socket pointer
+        // socket.socket becomes -1 when closed, but ctx.socket_fd has stable copy
+        // If they don't match, socket was closed - just clean up and return
+        if (ctx.socket.socket != ctx.socket_fd) {
+            // Socket closed while operation in-flight - clean up without callbacks
+            if (ctx.buffer_index) |buf_idx| {
+                self.buffer_pool.release(buf_idx);
+            }
+            self.freeOpContext(ctx);
+            return;
+        }
 
         // Check for errors
         if (cqe.res < 0) {
