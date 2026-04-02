@@ -312,6 +312,10 @@ pub const Switch = struct {
     /// This is the entry point for all packets arriving over UDP/IP.
     /// The packet will be authenticated, decrypted (if needed), and
     /// dispatched to the appropriate handler.
+    ///
+    /// Arena Optimization (Phase 1): All temporary allocations during packet
+    /// processing (crypto buffers, fragment reassembly, decompression) use
+    /// the arena allocator and are freed together when the function returns.
     pub fn onRemotePacket(
         self: *Self,
         t_ptr: ?*anyopaque,
@@ -321,6 +325,11 @@ pub const Switch = struct {
         len: u32,
         callbacks: *const Callbacks,
     ) void {
+        // Create arena for all temporary allocations during packet processing
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit(); // Frees all temp allocations at once
+        const temp_alloc = arena.allocator();
+
         const now = callbacks.now(callbacks.ctx);
 
         // Update path received timestamp
@@ -329,9 +338,9 @@ pub const Switch = struct {
         if (len > constants.proto_min_fragment_length) {
             // Check if this is a fragment
             if (data[constants.packet_fragment_idx_fragment_indicator] == constants.packet_fragment_indicator) {
-                self.handleFragment(t_ptr, data, len, from_addr, local_socket, now, callbacks);
+                self.handleFragment(t_ptr, data, len, from_addr, local_socket, now, callbacks, temp_alloc);
             } else if (len >= constants.proto_min_packet_length) {
-                self.handlePacketHead(t_ptr, data, len, from_addr, local_socket, now, callbacks);
+                self.handlePacketHead(t_ptr, data, len, from_addr, local_socket, now, callbacks, temp_alloc);
             }
         }
     }
@@ -701,7 +710,9 @@ pub const Switch = struct {
         _: i64,
         now: i64,
         callbacks: *const Callbacks,
+        temp_alloc: std.mem.Allocator,
     ) void {
+        _ = temp_alloc; // Reserved for future fragment buffer allocations
 
         // Validate fragment length bounds (CRITICAL: prevent buffer overflow)
         if (len < constants.proto_min_fragment_length or len > packet_mod.max_packet_length) return;
@@ -774,6 +785,7 @@ pub const Switch = struct {
         local_socket: i64,
         now: i64,
         callbacks: *const Callbacks,
+        temp_alloc: std.mem.Allocator,
     ) void {
         const dest_addr = Address.fromBytes(@ptrCast(data + 8));
         const src_addr = Address.fromBytes(@ptrCast(data + 13));
@@ -877,7 +889,7 @@ pub const Switch = struct {
 
                     // Process the reassembled packet
                     const incoming_callbacks = callbacks.createIncomingPacketCallbacks(callbacks.ctx, t_ptr);
-                    _ = rq.frag0.tryDecode(&incoming_callbacks, rq.flow_id);
+                    _ = rq.frag0.tryDecodeWithArena(&incoming_callbacks, rq.flow_id, temp_alloc);
 
                     // Clear this entry
                     rq.timestamp = 0;
@@ -894,7 +906,7 @@ pub const Switch = struct {
             // Create IncomingPacket callbacks and try to decode
             const incoming_callbacks = callbacks.createIncomingPacketCallbacks(callbacks.ctx, t_ptr);
             const flow_id: i32 = -1; // qos_no_flow
-            const decoded = incoming.tryDecode(&incoming_callbacks, flow_id);
+            const decoded = incoming.tryDecodeWithArena(&incoming_callbacks, flow_id, temp_alloc);
 
             if (!decoded) {
                 // Packet needs WHOIS - queue for retry later

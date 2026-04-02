@@ -382,10 +382,10 @@ Arena allocators are the **Zig-idiomatic solution** for operations where a group
 ### Phase 1: Packet Processing Arena (IN PROGRESS)
 - [x] Analysis complete
 - [x] Hot paths identified
-- [ ] Arena wrapper in onRemotePacket()
-- [ ] Pass temp_allocator to callees
-- [ ] Update IncomingPacket.tryDecode()
-- [ ] Update packet.zig crypto functions
+- [x] Arena wrapper in onRemotePacket()
+- [x] Pass temp_allocator to callees (handleFragment, handlePacketHead)
+- [x] Add IncomingPacket.tryDecodeWithArena()
+- [ ] Update packet.zig crypto functions to use temp_allocator
 - [ ] Benchmark before/after
 - [ ] Verify no memory leaks
 - [ ] All tests passing

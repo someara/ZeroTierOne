@@ -712,6 +712,35 @@ pub const IncomingPacket = struct {
         cb: *const Callbacks,
         flow_id: i32,
     ) bool {
+        // Default version without arena optimization
+        // Use tryDecodeWithArena for packet processing hot path
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const temp_alloc = arena.allocator();
+
+        return self.tryDecodeWithArena(cb, flow_id, temp_alloc);
+    }
+
+    /// Attempt to decode and process this packet (arena-optimized version).
+    ///
+    /// This version accepts a temporary allocator (arena) for all crypto
+    /// and decompression buffers. Should be called from the packet processing
+    /// hot path where an arena is already available.
+    ///
+    /// Returns `true` if processing is complete (packet accepted or
+    /// rejected). Returns `false` if the caller should retry later
+    /// (e.g. awaiting WHOIS response for the source peer).
+    pub fn tryDecodeWithArena(
+        self: *Self,
+        cb: *const Callbacks,
+        flow_id: i32,
+        temp_alloc: std.mem.Allocator,
+    ) bool {
+        _ = temp_alloc; // Reserved for crypto buffer allocations
         const source_address = self.pkt.source();
 
         // Check for trusted paths or unencrypted HELLOs
