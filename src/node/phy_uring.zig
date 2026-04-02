@@ -307,12 +307,28 @@ pub const PhyUring = struct {
 
         // Submit sendmsg operation first (before adding to list)
         const user_data = @intFromPtr(ctx);
-        _ = try self.ring.sendmsg(user_data, socket_impl.socket, msg, 0);
+        _ = self.ring.sendmsg(user_data, socket_impl.socket, msg, 0) catch |err| {
+            // BUG #12/#13 fix: If submission fails, clean up all allocated resources
+            self.allocator.destroy(msg);
+            self.allocator.destroy(dest_addr);
+            self.allocator.destroy(iov);
+            self.allocator.free(data_copy);
+            self.allocator.destroy(ctx);
+            return err;
+        };
 
         // Add to list after successful submission
         self.state_lock.lock();
         defer self.state_lock.unlock();
-        try self.op_contexts.append(ctx);
+        self.op_contexts.append(ctx) catch |err| {
+            // BUG #12/#13 fix: If append fails, all resources are leaked
+            self.allocator.destroy(msg);
+            self.allocator.destroy(dest_addr);
+            self.allocator.destroy(iov);
+            self.allocator.free(data_copy);
+            self.allocator.destroy(ctx);
+            return err;
+        };
     }
 
     /// Bind UDP socket to local address
@@ -497,12 +513,29 @@ pub const PhyUring = struct {
 
         // Submit recvmsg operation first (before adding to list)
         const user_data = @intFromPtr(ctx);
-        _ = try self.ring.recvmsg(user_data, socket.socket, msg, 0);
+        _ = self.ring.recvmsg(user_data, socket.socket, msg, 0) catch |err| {
+            // BUG #11 fix: If submission fails, clean up all allocated resources
+            self.allocator.destroy(sender_addr);
+            self.allocator.destroy(msg);
+            self.allocator.destroy(iov);
+            self.allocator.destroy(ctx);
+            self.buffer_pool.release(buf_info.index);
+            return err;
+        };
 
         // Add to list after successful submission
         self.state_lock.lock();
         defer self.state_lock.unlock();
-        try self.op_contexts.append(ctx);
+        self.op_contexts.append(ctx) catch |err| {
+            // BUG #11 fix: If append fails, ctx and buffer are leaked
+            // Clean up ctx and buffer
+            self.allocator.destroy(sender_addr);
+            self.allocator.destroy(msg);
+            self.allocator.destroy(iov);
+            self.allocator.destroy(ctx);
+            self.buffer_pool.release(buf_info.index);
+            return err;
+        };
     }
 
     /// Process a completion queue entry
