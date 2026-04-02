@@ -159,11 +159,54 @@ pub const TunDevice = struct {
 
     /// Open a TUN device on Linux using /dev/net/tun
     fn openLinux(allocator: Allocator, name_prefix: []const u8) !TunDevice {
-        _ = allocator;
-        _ = name_prefix;
-        // TODO: Implement Linux TUN device
-        // This would use /dev/net/tun and ioctl with TUNSETIFF
-        return error.NotImplementedYet;
+        // Linux TUN/TAP ioctl constants (from linux/if_tun.h)
+        const TUNSETIFF: u32 = 0x400454ca; // _IOW('T', 202, int)
+        const IFF_TUN: c_short = 0x0001;
+        const IFF_NO_PI: c_short = 0x1000; // Don't provide packet info
+
+        // struct ifreq from linux/if.h
+        const ifreq = extern struct {
+            ifr_name: [16]u8,
+            ifr_flags: c_short,
+            _padding: [22]u8, // Union padding to match C struct size (40 bytes total)
+        };
+
+        // Open the TUN device
+        const fd = try posix.open("/dev/net/tun", .{ .ACCMODE = .RDWR }, 0);
+        errdefer posix.close(fd);
+
+        // Configure the device
+        var ifr: ifreq = .{
+            .ifr_name = [_]u8{0} ** 16,
+            .ifr_flags = IFF_TUN | IFF_NO_PI,
+            ._padding = [_]u8{0} ** 22,
+        };
+
+        // Copy device name prefix (e.g., "tun")
+        const copy_len = @min(name_prefix.len, 15); // Leave room for null terminator
+        @memcpy(ifr.ifr_name[0..copy_len], name_prefix[0..copy_len]);
+
+        // Create the TUN device via ioctl
+        if (ioctl(fd, TUNSETIFF, @intFromPtr(&ifr)) < 0) {
+            return error.TunSetupFailed;
+        }
+
+        // Extract the actual device name assigned by the kernel
+        const name_end = std.mem.indexOfScalar(u8, &ifr.ifr_name, 0) orelse 16;
+        const device_name = try allocator.dupe(u8, ifr.ifr_name[0..name_end]);
+
+        // Set non-blocking mode
+        const current_flags = try posix.fcntl(fd, posix.F.GETFL, 0);
+        _ = try posix.fcntl(fd, posix.F.SETFL, current_flags | @as(u32, posix.O.NONBLOCK));
+
+        std.debug.print("  ✓ Linux TUN device opened: {s} (fd={d})\n", .{ device_name, fd });
+
+        return TunDevice{
+            .allocator = allocator,
+            .fd = fd,
+            .name = device_name,
+            .unit_number = 0, // Not used on Linux
+        };
     }
 
     /// Close the TUN device
@@ -292,17 +335,110 @@ pub const TunDevice = struct {
 
     /// Set address on Linux using ioctl
     fn setAddressLinux(self: *TunDevice, ip: [4]u8, netmask: [4]u8) !void {
-        _ = self;
-        _ = ip;
-        _ = netmask;
-        // TODO: Implement using SIOCSIFADDR ioctl
-        return error.NotImplementedYet;
+        // Linux network configuration ioctls
+        const SIOCSIFADDR: c_ulong = 0x8916; // Set interface address
+        const SIOCSIFNETMASK: c_ulong = 0x891c; // Set netmask
+        const SIOCSIFFLAGS: c_ulong = 0x8914; // Set interface flags
+
+        const IFF_UP: c_short = 0x1; // Interface is up
+        const IFF_RUNNING: c_short = 0x40; // Interface is running
+
+        const AF_INET: u16 = 2; // IPv4
+
+        // struct ifreq for address configuration
+        const ifreq = extern struct {
+            ifr_name: [16]u8,
+            ifr_data: extern union {
+                ifr_addr: extern struct {
+                    sa_family: u16,
+                    sa_data: [14]u8,
+                },
+                ifr_flags: c_short,
+            },
+        };
+
+        // Create a socket for ioctl operations
+        const sock = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0);
+        defer posix.close(sock);
+
+        // Set IP address
+        var ifr_addr: ifreq = .{
+            .ifr_name = [_]u8{0} ** 16,
+            .ifr_data = .{
+                .ifr_addr = .{
+                    .sa_family = AF_INET,
+                    .sa_data = undefined,
+                },
+            },
+        };
+
+        // Copy interface name
+        const name_len = @min(self.name.len, 15);
+        @memcpy(ifr_addr.ifr_name[0..name_len], self.name[0..name_len]);
+
+        // Set IP address in sa_data (network byte order)
+        ifr_addr.ifr_data.ifr_addr.sa_data[0] = 0;
+        ifr_addr.ifr_data.ifr_addr.sa_data[1] = 0;
+        ifr_addr.ifr_data.ifr_addr.sa_data[2] = ip[0];
+        ifr_addr.ifr_data.ifr_addr.sa_data[3] = ip[1];
+        ifr_addr.ifr_data.ifr_addr.sa_data[4] = ip[2];
+        ifr_addr.ifr_data.ifr_addr.sa_data[5] = ip[3];
+
+        if (ioctl(sock, SIOCSIFADDR, @intFromPtr(&ifr_addr)) < 0) {
+            return error.SetAddressFailed;
+        }
+
+        // Set netmask
+        var ifr_netmask: ifreq = .{
+            .ifr_name = [_]u8{0} ** 16,
+            .ifr_data = .{
+                .ifr_addr = .{
+                    .sa_family = AF_INET,
+                    .sa_data = undefined,
+                },
+            },
+        };
+
+        @memcpy(ifr_netmask.ifr_name[0..name_len], self.name[0..name_len]);
+        ifr_netmask.ifr_data.ifr_addr.sa_data[0] = 0;
+        ifr_netmask.ifr_data.ifr_addr.sa_data[1] = 0;
+        ifr_netmask.ifr_data.ifr_addr.sa_data[2] = netmask[0];
+        ifr_netmask.ifr_data.ifr_addr.sa_data[3] = netmask[1];
+        ifr_netmask.ifr_data.ifr_addr.sa_data[4] = netmask[2];
+        ifr_netmask.ifr_data.ifr_addr.sa_data[5] = netmask[3];
+
+        if (ioctl(sock, SIOCSIFNETMASK, @intFromPtr(&ifr_netmask)) < 0) {
+            return error.SetNetmaskFailed;
+        }
+
+        // Bring interface up
+        var ifr_flags: ifreq = .{
+            .ifr_name = [_]u8{0} ** 16,
+            .ifr_data = .{
+                .ifr_flags = IFF_UP | IFF_RUNNING,
+            },
+        };
+
+        @memcpy(ifr_flags.ifr_name[0..name_len], self.name[0..name_len]);
+
+        if (ioctl(sock, SIOCSIFFLAGS, @intFromPtr(&ifr_flags)) < 0) {
+            return error.SetFlagsFailed;
+        }
+
+        var ip_buf: [16]u8 = undefined;
+        var netmask_buf: [16]u8 = undefined;
+        const ip_str = try std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] });
+        const netmask_str = try std.fmt.bufPrint(&netmask_buf, "{d}.{d}.{d}.{d}", .{ netmask[0], netmask[1], netmask[2], netmask[3] });
+
+        std.debug.print("  ✓ Set address: {s} netmask {s}\n", .{ ip_str, netmask_str });
     }
 
     /// Add a route through this TUN device
     pub fn addRoute(self: *TunDevice, dest: [4]u8, netmask: [4]u8) !void {
         if (builtin.os.tag == .macos) {
             return try self.addRouteMacOS(dest, netmask);
+        } else if (builtin.os.tag == .linux) {
+            return try self.addRouteLinux(dest, netmask);
         } else {
             return error.NotImplementedYet;
         }
@@ -324,6 +460,48 @@ pub const TunDevice = struct {
             "-netmask",
             netmask_str,
             "-interface",
+            self.name,
+        };
+
+        var child = std.process.Child.init(&argv, self.allocator);
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+
+        const result = try child.spawnAndWait();
+        if (result != .Exited or result.Exited != 0) {
+            // Route might already exist, that's ok
+            return;
+        }
+
+        std.debug.print("  ✓ Added route: {s}/{s} via {s}\n", .{ dest_str, netmask_str, self.name });
+    }
+
+    /// Add route on Linux using ip command
+    fn addRouteLinux(self: *TunDevice, dest: [4]u8, netmask: [4]u8) !void {
+        var dest_buf: [16]u8 = undefined;
+        var netmask_buf: [16]u8 = undefined;
+
+        const dest_str = try std.fmt.bufPrint(&dest_buf, "{d}.{d}.{d}.{d}", .{ dest[0], dest[1], dest[2], dest[3] });
+        const netmask_str = try std.fmt.bufPrint(&netmask_buf, "{d}.{d}.{d}.{d}", .{ netmask[0], netmask[1], netmask[2], netmask[3] });
+
+        // Calculate CIDR prefix length from netmask
+        var prefix_len: u8 = 0;
+        for (netmask) |byte| {
+            var b = byte;
+            while (b != 0) : (b <<= 1) {
+                prefix_len += 1;
+            }
+        }
+
+        var cidr_buf: [20]u8 = undefined;
+        const cidr = try std.fmt.bufPrint(&cidr_buf, "{s}/{d}", .{ dest_str, prefix_len });
+
+        const argv = [_][]const u8{
+            "/sbin/ip",
+            "route",
+            "add",
+            cidr,
+            "dev",
             self.name,
         };
 
