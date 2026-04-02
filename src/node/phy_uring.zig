@@ -518,9 +518,24 @@ pub const PhyUring = struct {
             }
         }
 
-        // TODO BUG #30: Should cancel pending operations with IORING_OP_ASYNC_CANCEL
-        // For now, pending operations will complete with -ECANCELED
-        // They reference freed socket (BUG #17/#28/#31) - needs refcounting
+        // BUG #30: Operation cancellation not yet implemented
+        //
+        // ISSUE: Socket freed while operations may still be in-flight. When those
+        // operations complete, processCqe() dereferences freed OpContext.socket pointer.
+        //
+        // PROPER FIX requires one of:
+        // 1. Submit IORING_OP_ASYNC_CANCEL for each pending op (track ops per socket)
+        // 2. Reference counting on sockets (socket only freed when refcount == 0)
+        // 3. Invalidate socket pointer in all pending ops before free (linear scan)
+        //
+        // CURRENT WORKAROUND: Operations complete with -ECANCELED (suppressed by BUG #23),
+        // but socket pointer is already dangling. This is a use-after-free that will
+        // manifest as crashes or corruption if operations complete after close().
+        //
+        // MITIGATION: In practice, close() is rare (only on shutdown/error). Most sockets
+        // live for the lifetime of the program. Still unsafe for production.
+        //
+        // STATUS: Deferred — requires architecture decision (refcounting vs cancellation)
 
         // Free socket (UNSAFE if operations pending - see BUG #17/#28/#31)
         self.allocator.destroy(socket_impl);
