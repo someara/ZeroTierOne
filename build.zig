@@ -85,6 +85,9 @@ pub fn build(b: *std.Build) void {
         "src/test_bug_hunting_regression.zig",
         // Integration tests
         "src/test_critical_paths_integration.zig",
+        "src/test_peer_to_peer_integration.zig",
+        "src/test_peer_to_peer_fuzz.zig",
+        "src/test_aggressive_fuzz.zig",
     };
 
     const test_step = b.step("test", "Run Zig module tests");
