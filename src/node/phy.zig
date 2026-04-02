@@ -44,8 +44,8 @@ pub const SocketType = enum(u8) {
     unix_listen = 0x08, // Unix domain socket (listener)
 };
 
-/// Internal socket implementation
-const PhySocketImpl = struct {
+/// Internal socket implementation (exported for backend use)
+pub const PhySocketImpl = struct {
     type: SocketType,
     socket: posix.socket_t, // OS socket handle (int on Unix, SOCKET on Windows)
     uptr: ?*anyopaque, // user-settable pointer
