@@ -262,24 +262,33 @@ pub const PhyUring = struct {
     }
 
     /// Send UDP datagram (non-blocking)
+    /// BUG #41 fix: Return bool to match poll() backend API
     pub fn udpSend(
         self: *PhyUring,
         sock: *PhySocket,
         to: net.Address,
         data: []const u8,
-    ) !void {
+    ) bool {
         const socket_impl: *PhySocketImpl = @ptrCast(@alignCast(sock));
 
+        // BUG #41 fix: Return false on allocation failure (match poll() behavior)
         // Allocate operation context
-        const ctx = try self.allocator.create(OpContext);
+        const ctx = self.allocator.create(OpContext) catch return false;
         errdefer self.allocator.destroy(ctx);
 
         // Copy data (MUST outlive udpSend)
-        const data_copy = try self.allocator.dupe(u8, data);
+        const data_copy = self.allocator.dupe(u8, data) catch {
+            self.allocator.destroy(ctx);
+            return false;
+        };
         errdefer self.allocator.free(data_copy);
 
         // Heap-allocate iovec (MUST outlive udpSend)
-        const iov = try self.allocator.create(posix.iovec);
+        const iov = self.allocator.create(posix.iovec) catch {
+            self.allocator.free(data_copy);
+            self.allocator.destroy(ctx);
+            return false;
+        };
         errdefer self.allocator.destroy(iov);
         iov.* = .{
             .base = @constCast(data_copy.ptr),
@@ -287,12 +296,23 @@ pub const PhyUring = struct {
         };
 
         // Heap-allocate destination address (MUST outlive udpSend)
-        const dest_addr = try self.allocator.create(net.Address);
+        const dest_addr = self.allocator.create(net.Address) catch {
+            self.allocator.destroy(iov);
+            self.allocator.free(data_copy);
+            self.allocator.destroy(ctx);
+            return false;
+        };
         errdefer self.allocator.destroy(dest_addr);
         dest_addr.* = to;
 
         // Heap-allocate msghdr_const (MUST outlive udpSend)
-        const msg = try self.allocator.create(posix.msghdr_const);
+        const msg = self.allocator.create(posix.msghdr_const) catch {
+            self.allocator.destroy(dest_addr);
+            self.allocator.destroy(iov);
+            self.allocator.free(data_copy);
+            self.allocator.destroy(ctx);
+            return false;
+        };
         errdefer self.allocator.destroy(msg);
         msg.* = mem.zeroes(posix.msghdr_const);
         msg.iov = @ptrCast(iov);
@@ -320,14 +340,14 @@ pub const PhyUring = struct {
             if (err == error.SubmissionQueueFull) {
                 _ = self.ring.submit() catch {};
                 // Retry once after flushing
-                _ = self.ring.sendmsg(user_data, socket_impl.socket, msg, 0) catch |retry_err| {
-                    // If still fails, clean up and return error
+                _ = self.ring.sendmsg(user_data, socket_impl.socket, msg, 0) catch {
+                    // If still fails, clean up and return false
                     self.allocator.destroy(msg);
                     self.allocator.destroy(dest_addr);
                     self.allocator.destroy(iov);
                     self.allocator.free(data_copy);
                     self.allocator.destroy(ctx);
-                    return retry_err;
+                    return false;
                 };
             } else {
                 // BUG #12/#13 fix: If submission fails, clean up all allocated resources
@@ -336,29 +356,33 @@ pub const PhyUring = struct {
                 self.allocator.destroy(iov);
                 self.allocator.free(data_copy);
                 self.allocator.destroy(ctx);
-                return err;
+                return false;
             }
         };
 
         // Add to list after successful submission
         self.state_lock.lock();
         defer self.state_lock.unlock();
-        self.op_contexts.append(ctx) catch |err| {
+        self.op_contexts.append(ctx) catch {
             // BUG #12/#13 fix: If append fails, all resources are leaked
             self.allocator.destroy(msg);
             self.allocator.destroy(dest_addr);
             self.allocator.destroy(iov);
             self.allocator.free(data_copy);
             self.allocator.destroy(ctx);
-            return err;
+            return false;
         };
+
+        return true;
     }
 
     /// Bind UDP socket to local address
+    /// BUG #42 fix: Add buffer_size parameter to match poll() backend API
     pub fn udpBind(
         self: *PhyUring,
         local_addr: net.Address,
         uptr: ?*anyopaque,
+        buffer_size: usize,
     ) !*PhySocket {
         // Create UDP socket
         const fd = try posix.socket(
@@ -375,6 +399,22 @@ pub const PhyUring = struct {
             posix.SO.REUSEADDR,
             &mem.toBytes(@as(c_int, 1)),
         );
+
+        // BUG #42 fix: Set buffer sizes if specified (match poll() backend)
+        if (buffer_size > 0) {
+            try posix.setsockopt(
+                fd,
+                posix.SOL.SOCKET,
+                posix.SO.RCVBUF,
+                &mem.toBytes(@as(c_int, @intCast(buffer_size))),
+            );
+            try posix.setsockopt(
+                fd,
+                posix.SOL.SOCKET,
+                posix.SO.SNDBUF,
+                &mem.toBytes(@as(c_int, @intCast(buffer_size))),
+            );
+        }
 
         // Set SO_NO_CHECK if requested (disable UDP checksums)
         if (self.no_check) {
