@@ -37,9 +37,10 @@ pub const HttpApi = struct {
         auth_token: []const u8,
     ) !*HttpApi {
         const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
-        const server = try address.listen(.{
+        var server = try address.listen(.{
             .reuse_address = true,
         });
+        errdefer server.deinit(); // BUG FIX #9: Clean up server if allocation/spawn fails
 
         const self = try allocator.create(HttpApi);
         errdefer allocator.destroy(self); // Clean up if thread spawn fails
