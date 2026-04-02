@@ -232,6 +232,11 @@ pub const PhyUring = struct {
         const submitted = try self.ring.submit();
         _ = submitted;
 
+        // BUG #39 fix: Check for completion queue overflow
+        if (self.ring.cq.overflow > 0) {
+            std.debug.print("phy_uring: WARNING: CQ overflow detected, {} completions dropped\n", .{self.ring.cq.overflow});
+        }
+
         // Wait for completions (with timeout)
         const wait_nr: u32 = 1; // Wait for at least 1 completion
         var cqes: [32]linux.io_uring_cqe = undefined;
@@ -311,13 +316,28 @@ pub const PhyUring = struct {
         // Submit sendmsg operation first (before adding to list)
         const user_data = @intFromPtr(ctx);
         _ = self.ring.sendmsg(user_data, socket_impl.socket, msg, 0) catch |err| {
-            // BUG #12/#13 fix: If submission fails, clean up all allocated resources
-            self.allocator.destroy(msg);
-            self.allocator.destroy(dest_addr);
-            self.allocator.destroy(iov);
-            self.allocator.free(data_copy);
-            self.allocator.destroy(ctx);
-            return err;
+            // BUG #36 fix: Handle SubmissionQueueFull by submitting pending ops and retrying
+            if (err == error.SubmissionQueueFull) {
+                _ = self.ring.submit() catch {};
+                // Retry once after flushing
+                _ = self.ring.sendmsg(user_data, socket_impl.socket, msg, 0) catch |retry_err| {
+                    // If still fails, clean up and return error
+                    self.allocator.destroy(msg);
+                    self.allocator.destroy(dest_addr);
+                    self.allocator.destroy(iov);
+                    self.allocator.free(data_copy);
+                    self.allocator.destroy(ctx);
+                    return retry_err;
+                };
+            } else {
+                // BUG #12/#13 fix: If submission fails, clean up all allocated resources
+                self.allocator.destroy(msg);
+                self.allocator.destroy(dest_addr);
+                self.allocator.destroy(iov);
+                self.allocator.free(data_copy);
+                self.allocator.destroy(ctx);
+                return err;
+            }
         };
 
         // Add to list after successful submission
@@ -522,13 +542,28 @@ pub const PhyUring = struct {
         // Submit recvmsg operation first (before adding to list)
         const user_data = @intFromPtr(ctx);
         _ = self.ring.recvmsg(user_data, socket.socket, msg, 0) catch |err| {
-            // BUG #11 fix: If submission fails, clean up all allocated resources
-            self.allocator.destroy(sender_addr);
-            self.allocator.destroy(msg);
-            self.allocator.destroy(iov);
-            self.allocator.destroy(ctx);
-            self.buffer_pool.release(buf_info.index);
-            return err;
+            // BUG #36 fix: Handle SubmissionQueueFull by submitting pending ops and retrying
+            if (err == error.SubmissionQueueFull) {
+                _ = self.ring.submit() catch {};
+                // Retry once after flushing
+                _ = self.ring.recvmsg(user_data, socket.socket, msg, 0) catch |retry_err| {
+                    // If still fails, clean up and return error
+                    self.allocator.destroy(sender_addr);
+                    self.allocator.destroy(msg);
+                    self.allocator.destroy(iov);
+                    self.allocator.destroy(ctx);
+                    self.buffer_pool.release(buf_info.index);
+                    return retry_err;
+                };
+            } else {
+                // BUG #11 fix: If submission fails, clean up all allocated resources
+                self.allocator.destroy(sender_addr);
+                self.allocator.destroy(msg);
+                self.allocator.destroy(iov);
+                self.allocator.destroy(ctx);
+                self.buffer_pool.release(buf_info.index);
+                return err;
+            }
         };
 
         // Add to list after successful submission
