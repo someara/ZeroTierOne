@@ -203,6 +203,24 @@ pub const PhyUring = struct {
 
     /// Clean up PhyUring resources
     pub fn deinit(self: *PhyUring) void {
+        // CRITICAL: Process any remaining completions to free OpContexts
+        // Without this, pending operations leak their contexts
+        var cqes: [256]linux.io_uring_cqe = undefined;
+        while (true) {
+            const count = self.ring.copy_cqes(&cqes, 0) catch break;
+            if (count == 0) break;
+
+            for (cqes[0..count]) |*cqe| {
+                const ctx = @as(*OpContext, @ptrFromInt(cqe.user_data));
+                // Clean up without callbacks (shutting down)
+                if (ctx.buffer_index) |buf_idx| {
+                    self.buffer_pool.release(buf_idx);
+                }
+                self.freeOpContext(ctx);
+            }
+            self.ring.cq_advance(count);
+        }
+
         // Clean up all sockets
         for (self.sockets.items) |socket| {
             if (socket.socket >= 0) {
@@ -211,8 +229,6 @@ pub const PhyUring = struct {
             self.allocator.destroy(socket);
         }
         self.sockets.deinit();
-
-        // BUG #29 fix: op_contexts list removed - contexts freed when operations complete
 
         // Clean up buffer pool
         self.buffer_pool.deinit();
