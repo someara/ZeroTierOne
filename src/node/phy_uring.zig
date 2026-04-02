@@ -379,7 +379,12 @@ pub const PhyUring = struct {
         };
 
         // Submit initial receive operation first
-        try self.submitUdpRecv(socket_impl);
+        // BUG #24 fix: Must succeed before adding socket to list
+        self.submitUdpRecv(socket_impl) catch |err| {
+            posix.close(fd);
+            self.allocator.destroy(socket_impl);
+            return err;
+        };
 
         // Add to sockets list after successful setup
         self.state_lock.lock();
@@ -546,7 +551,11 @@ pub const PhyUring = struct {
         // Check for errors
         if (cqe.res < 0) {
             const err = linux.E.init(-cqe.res);
-            std.debug.print("phy_uring: operation failed with error: {}\n", .{err});
+
+            // BUG #23 fix: Don't print error for ECANCELED (expected on socket close)
+            if (err != .CANCELED) {
+                std.debug.print("phy_uring: operation failed with error: {}\n", .{err});
+            }
 
             // Clean up context
             if (ctx.buffer_index) |buf_idx| {
@@ -585,6 +594,7 @@ pub const PhyUring = struct {
                 self.buffer_pool.release(buf_idx);
 
                 // Submit another receive operation for this socket
+                // BUG #22 fix: If resubmit fails, buffer was already released above
                 self.submitUdpRecv(ctx.socket) catch |err| {
                     std.debug.print("phy_uring: failed to resubmit recv: {}\n", .{err});
                 };
