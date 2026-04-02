@@ -557,7 +557,7 @@ pub const Packet = struct {
 
     /// Derive a per-packet Salsa20 key by XOR-ing header fields into
     /// the shared secret. This gives an effective IV wider than 64 bits.
-    fn salsa20MangleKey(self: *const Packet, in_key: *const [32]u8) [32]u8 {
+    inline fn salsa20MangleKey(self: *const Packet, in_key: *const [32]u8) [32]u8 {
         const d = self.buf.data();
         if (d.len < min_packet_length) return in_key.*;
 
@@ -647,6 +647,9 @@ pub const Packet = struct {
     }
 
     fn armorSalsa(self: *Packet, key: *const [32]u8, encrypt_payload: bool) void {
+        // Disable runtime safety checks for performance (hot path)
+        @setRuntimeSafety(false);
+
         if (encrypt_payload) {
             self.setCipher(.c25519_poly1305_salsa2012);
         } else {
@@ -824,6 +827,9 @@ pub const Packet = struct {
     }
 
     fn dearmorSalsa(self: *Packet, key: *const [32]u8, cs: CipherSuite) bool {
+        // Disable runtime safety checks for performance (hot path)
+        @setRuntimeSafety(false);
+
         const mangled_key = self.salsa20MangleKey(key);
         const pkt_data = self.buf.dataMut();
         if (pkt_data.len < min_packet_length) return false;
@@ -962,7 +968,7 @@ fn sliceToArray5(s: []u8) *[5]u8 {
 }
 
 /// Constant-time comparison of two 8-byte slices.
-fn constantTimeEql8(a: *const [8]u8, b: *const [8]u8) bool {
+inline fn constantTimeEql8(a: *const [8]u8, b: *const [8]u8) bool {
     var diff: u8 = 0;
     for (0..8) |i| {
         diff |= a[i] ^ b[i];

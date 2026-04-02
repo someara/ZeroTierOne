@@ -209,6 +209,29 @@ pub fn build(b: *std.Build) void {
     selftest_step.dependOn(&run_selftest.step);
 
     // ---------------------------------------------------------------
+    // Packet Processing Benchmark (`zig build bench-packets`)
+    // ---------------------------------------------------------------
+    // Measure packet encrypt/decrypt throughput
+    const bench_packets_mod = b.createModule(.{
+        .root_source_file = b.path("src/benchmark_packet_processing.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_packets_mod.addIncludePath(b.path("."));
+
+    const bench_packets_exe = b.addExecutable(.{
+        .name = "zerotier-bench-packets",
+        .root_module = bench_packets_mod,
+    });
+
+    b.installArtifact(bench_packets_exe);
+
+    const run_bench_packets = b.addRunArtifact(bench_packets_exe);
+    run_bench_packets.step.dependOn(b.getInstallStep());
+    const bench_packets_step = b.step("bench-packets", "Benchmark packet processing throughput");
+    bench_packets_step.dependOn(&run_bench_packets.step);
+
+    // ---------------------------------------------------------------
     // HTTP Client Test (`zig build test-http-client`)
     // ---------------------------------------------------------------
     // Test HTTP client against running zerotier-one service
