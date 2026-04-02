@@ -196,8 +196,9 @@ pub const TunDevice = struct {
         const device_name = try allocator.dupe(u8, ifr.ifr_name[0..name_end]);
 
         // Set non-blocking mode
+        const O_NONBLOCK: u32 = 0x800; // O_NONBLOCK on Linux (ARM and x86)
         const current_flags = try posix.fcntl(fd, posix.F.GETFL, 0);
-        _ = try posix.fcntl(fd, posix.F.SETFL, current_flags | @as(u32, posix.O.NONBLOCK));
+        _ = try posix.fcntl(fd, posix.F.SETFL, current_flags | O_NONBLOCK);
 
         std.debug.print("  ✓ Linux TUN device opened: {s} (fd={d})\n", .{ device_name, fd });
 

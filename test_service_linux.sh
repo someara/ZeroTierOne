@@ -46,7 +46,11 @@ section() {
 # Clean up function
 cleanup() {
     if [ ! -z "$SERVICE_PID" ]; then
-        sudo kill $SERVICE_PID 2>/dev/null || true
+        if [ "$EUID" -eq 0 ]; then
+            kill $SERVICE_PID 2>/dev/null || true
+        else
+            sudo kill $SERVICE_PID 2>/dev/null || true
+        fi
         wait $SERVICE_PID 2>/dev/null || true
     fi
     # Clean up TUN devices if they exist
@@ -80,8 +84,8 @@ fi
 
 # Test 1: Build
 section "Test 1: Build Service"
-# Build the service executable
-if zig build-exe src/zerotier_one.zig -I./src -I. --name zerotier-one-test -O Debug > /tmp/zt-build.log 2>&1; then
+# Build the service executable (need -lc for @cImport in constants.zig)
+if zig build-exe src/zerotier_one.zig -I./src -I. -lc --name zerotier-one-test -O Debug > /tmp/zt-build.log 2>&1; then
     pass "Service builds successfully"
     mkdir -p zig-out/bin
     mv zerotier-one-test zig-out/bin/ 2>/dev/null || true
@@ -258,8 +262,13 @@ SERVICE_PID=""
 # Test 11: TUN Device Tests (requires sudo)
 section "Test 11: TUN Device Creation"
 if [ "$EUID" -eq 0 ] || sudo -n true 2>/dev/null; then
-    echo "Starting service with TUN device (requires sudo)..."
-    sudo $TEST_BINARY -p 9996 -d "$TEST_DIR" --tun > /tmp/zt-service-tun.log 2>&1 &
+    echo "Starting service with TUN device (requires sudo/root)..."
+    # Use sudo if available and not root, otherwise run directly
+    if [ "$EUID" -eq 0 ]; then
+        $TEST_BINARY -p 9996 -d "$TEST_DIR" --tun > /tmp/zt-service-tun.log 2>&1 &
+    else
+        sudo $TEST_BINARY -p 9996 -d "$TEST_DIR" --tun > /tmp/zt-service-tun.log 2>&1 &
+    fi
     SERVICE_PID=$!
     sleep 3
 
@@ -308,7 +317,11 @@ if [ "$EUID" -eq 0 ] || sudo -n true 2>/dev/null; then
     # Test 13: TUN Device Cleanup
     section "Test 13: TUN Device Cleanup"
     if [ ! -z "$SERVICE_PID" ] && kill -0 $SERVICE_PID 2>/dev/null; then
-        sudo kill -TERM $SERVICE_PID 2>/dev/null || true
+        if [ "$EUID" -eq 0 ]; then
+            kill -TERM $SERVICE_PID 2>/dev/null || true
+        else
+            sudo kill -TERM $SERVICE_PID 2>/dev/null || true
+        fi
         sleep 2
         pass "Service with TUN stopped"
         SERVICE_PID=""
