@@ -146,7 +146,7 @@ pub const PhyUring = struct {
     ring: IoUring,
     sockets: std.ArrayList(*PhySocketImpl),
     buffer_pool: BufferPool,
-    op_contexts: std.ArrayList(*OpContext), // Active operations
+    // BUG #29 fix: op_contexts list removed - not needed since user_data gives direct access
 
     // Wake-up eventfd for interrupting from another thread
     wakeup_fd: posix.fd_t,
@@ -190,7 +190,6 @@ pub const PhyUring = struct {
             .ring = ring,
             .sockets = std.ArrayList(*PhySocketImpl).init(allocator),
             .buffer_pool = buffer_pool,
-            .op_contexts = std.ArrayList(*OpContext).init(allocator),
             .wakeup_fd = wakeup_fd,
             .state_lock = .{},
             .no_delay = no_delay,
@@ -209,11 +208,7 @@ pub const PhyUring = struct {
         }
         self.sockets.deinit();
 
-        // Clean up operation contexts
-        for (self.op_contexts.items) |ctx| {
-            self.allocator.destroy(ctx);
-        }
-        self.op_contexts.deinit();
+        // BUG #29 fix: op_contexts list removed - contexts freed when operations complete
 
         // Clean up buffer pool
         self.buffer_pool.deinit();
@@ -362,18 +357,8 @@ pub const PhyUring = struct {
             }
         };
 
-        // Add to list after successful submission
-        self.state_lock.lock();
-        defer self.state_lock.unlock();
-        self.op_contexts.append(ctx) catch {
-            // BUG #12/#13 fix: If append fails, all resources are leaked
-            self.allocator.destroy(msg);
-            self.allocator.destroy(dest_addr);
-            self.allocator.destroy(iov);
-            self.allocator.free(data_copy);
-            self.allocator.destroy(ctx);
-            return false;
-        };
+        // BUG #29 fix: No need to track in list - user_data gives direct access
+        // Context will be freed when operation completes in processCqe/freeOpContext
 
         return true;
     }
@@ -628,19 +613,8 @@ pub const PhyUring = struct {
             }
         };
 
-        // Add to list after successful submission
-        self.state_lock.lock();
-        defer self.state_lock.unlock();
-        self.op_contexts.append(ctx) catch |err| {
-            // BUG #11 fix: If append fails, ctx and buffer are leaked
-            // Clean up ctx and buffer
-            self.allocator.destroy(sender_addr);
-            self.allocator.destroy(msg);
-            self.allocator.destroy(iov);
-            self.allocator.destroy(ctx);
-            self.buffer_pool.release(buf_info.index);
-            return err;
-        };
+        // BUG #29 fix: No need to track in list - user_data gives direct access
+        // Context will be freed when operation completes in processCqe/freeOpContext
     }
 
     /// Process a completion queue entry
@@ -730,6 +704,7 @@ pub const PhyUring = struct {
         self.freeOpContext(ctx);
     }
 
+    /// BUG #29 fix: O(1) cleanup - no list search needed
     fn freeOpContext(self: *PhyUring, ctx: *OpContext) void {
         // Free all heap-allocated structures (OWNED by OpContext)
         if (ctx.iov) |iov| self.allocator.destroy(iov);
@@ -739,17 +714,7 @@ pub const PhyUring = struct {
         if (ctx.dest_addr) |addr| self.allocator.destroy(addr);
         if (ctx.data_copy) |data| self.allocator.free(data);
 
-        // Remove from list (thread-safe)
-        self.state_lock.lock();
-        defer self.state_lock.unlock();
-
-        for (self.op_contexts.items, 0..) |item, i| {
-            if (item == ctx) {
-                _ = self.op_contexts.swapRemove(i);
-                break;
-            }
-        }
-
+        // Free context itself
         self.allocator.destroy(ctx);
     }
 };
