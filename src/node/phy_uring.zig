@@ -100,7 +100,10 @@ const BufferPool = struct {
     }
 
     fn getBuffer(self: *BufferPool, index: usize) []u8 {
-        std.debug.assert(index < BUFFER_COUNT);
+        // BUG #26 fix: Runtime validation in release builds
+        if (index >= BUFFER_COUNT) {
+            @panic("phy_uring: buffer index out of bounds");
+        }
         return &self.buffers[index];
     }
 };
@@ -568,11 +571,29 @@ pub const PhyUring = struct {
         // Process based on operation type
         switch (ctx.op_type) {
             .recv_udp => {
+                // BUG #25 fix: Validate cqe.res before cast (64-bit systems are fine, but be safe)
+                if (cqe.res > std.math.maxInt(usize)) {
+                    std.debug.print("phy_uring: received size too large: {}\n", .{cqe.res});
+                    if (ctx.buffer_index) |buf_idx| {
+                        self.buffer_pool.release(buf_idx);
+                    }
+                    self.freeOpContext(ctx);
+                    return;
+                }
                 const bytes_received = @as(usize, @intCast(cqe.res));
 
                 // Get buffer
                 const buf_idx = ctx.buffer_index.?;
                 const buffer = self.buffer_pool.getBuffer(buf_idx);
+
+                // BUG #27 fix: Validate bytes_received <= buffer.len
+                if (bytes_received > buffer.len) {
+                    std.debug.print("phy_uring: received bytes ({}) exceeds buffer size ({})\n", .{ bytes_received, buffer.len });
+                    self.buffer_pool.release(buf_idx);
+                    self.freeOpContext(ctx);
+                    return;
+                }
+
                 const data = buffer[0..bytes_received];
 
                 // Extract source address from sender_addr
