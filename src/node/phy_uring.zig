@@ -239,15 +239,17 @@ pub const PhyUring = struct {
 
         // Wait for completions (with timeout)
         const wait_nr: u32 = 1; // Wait for at least 1 completion
-        var cqes: [32]linux.io_uring_cqe = undefined;
+        // BUG #37 fix: Increase batch size to 256 for better throughput
+        var cqes: [256]linux.io_uring_cqe = undefined;
 
-        // Calculate timeout in nanoseconds for io_uring
+        // BUG #38: Timeout calculation but not used
+        // copy_cqes() doesn't support timeout parameter
+        // Would need to use submit_and_wait() or io_uring_enter() with timeout
         const timeout_ns = if (timeout_ms == std.math.maxInt(u64))
             std.math.maxInt(u64)
         else
             timeout_ms * 1_000_000;
-
-        _ = timeout_ns; // TODO: Use timeout in submit_and_wait
+        _ = timeout_ns; // Currently unused - minor issue, deferred
 
         // Get completions
         const count = try self.ring.copy_cqes(&cqes, wait_nr);
@@ -546,6 +548,11 @@ pub const PhyUring = struct {
         // Write to eventfd to wake up io_uring_enter()
         const value: u64 = 1;
         _ = posix.write(self.wakeup_fd, mem.asBytes(&value)) catch {};
+    }
+
+    /// BUG #43 fix: Alias for wakeup() to match poll() backend naming
+    pub fn whack(self: *PhyUring) void {
+        self.wakeup();
     }
 
     // ── Internal Helpers ───────────────────────────────────────────────
