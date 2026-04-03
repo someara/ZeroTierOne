@@ -24,6 +24,11 @@ const pkt = @import("node/packet.zig");
 const buffer_mod = @import("node/buffer.zig");
 const PacketBuffer = buffer_mod.Buffer(pkt.max_packet_length);
 
+// Fixed: STYLE.md 5.7 - Named constants instead of magic numbers
+const default_zerotier_port: u16 = 9993;
+const peer_cleanup_interval_ms: i64 = 300_000; // 5 minutes
+const packet_dedup_ring_size: usize = 1000;
+
 /// Root server state
 const RootServer = struct {
     identity: Identity,
@@ -36,8 +41,8 @@ const RootServer = struct {
     peers: std.AutoHashMap(u64, PeerInfo),
 
     /// Fixed BUG #34: Track replied packet IDs to avoid duplicate replies
-    /// Ring buffer of last 1000 packet IDs (simple deduplication)
-    replied_packets: [1000]u64,
+    /// Ring buffer of last N packet IDs (simple deduplication)
+    replied_packets: [packet_dedup_ring_size]u64,
     replied_packets_idx: usize,
 
     const PeerInfo = struct {
@@ -77,7 +82,7 @@ const RootServer = struct {
             .socket = sock,
             .allocator = allocator,
             .peers = std.AutoHashMap(u64, PeerInfo).init(allocator),
-            .replied_packets = [_]u64{0} ** 1000,
+            .replied_packets = [_]u64{0} ** packet_dedup_ring_size,
             .replied_packets_idx = 0,
         };
     }
@@ -107,9 +112,9 @@ const RootServer = struct {
         var last_cleanup: i64 = std.time.milliTimestamp();
 
         while (true) {
-            // Fixed BUG #33: Periodic cleanup of stale peers (every 5 minutes)
+            // Fixed BUG #33: Periodic cleanup of stale peers
             const now = std.time.milliTimestamp();
-            if (now - last_cleanup > 300_000) { // 5 minutes in milliseconds
+            if (now - last_cleanup > peer_cleanup_interval_ms) {
                 self.cleanupStalePeers(now);
                 last_cleanup = now;
             }
@@ -161,9 +166,9 @@ const RootServer = struct {
         }
     }
 
-    /// Fixed BUG #33: Clean up peers that haven't been seen in 5 minutes
+    /// Fixed BUG #33: Clean up peers that haven't been seen in peer_cleanup_interval_ms
     fn cleanupStalePeers(self: *RootServer, now: i64) void {
-        const timeout_ms = 300_000; // 5 minutes
+        const timeout_ms = peer_cleanup_interval_ms;
         var to_remove = std.ArrayList(u64).init(self.allocator);
         defer to_remove.deinit();
 
@@ -493,8 +498,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Default port: 9993 (standard ZeroTier)
-    const port: u16 = 9993;
+    const port: u16 = default_zerotier_port;
 
     var server = try RootServer.init(allocator, port);
     defer server.deinit();
