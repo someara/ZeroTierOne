@@ -265,28 +265,32 @@ const Controller = struct {
         std.debug.print("    Requested network: 0x{x}\n", .{network_id});
 
         // Check if we manage this network
-        var network_config = self.networks.getPtr(network_id);
-        if (network_config == null) {
+        // Fixed: STYLE.md - idiomatic optional handling
+        var network_config = self.networks.getPtr(network_id) orelse {
             std.debug.print("    ❌ Unknown network\n", .{});
             return;
-        }
+        };
 
         // Auto-authorize the member
-        const member_result = try network_config.?.members.getOrPut(peer_addr_int);
+        const member_result = try network_config.members.getOrPut(peer_addr_int);
         if (!member_result.found_existing) {
             // Fixed BUG #16: Clean up on error
-            errdefer _ = network_config.?.members.remove(peer_addr_int);
+            errdefer _ = network_config.members.remove(peer_addr_int);
 
             // New member - assign IP
-            var ip_list = std.ArrayList([4]u8){};
+            // Fixed: STYLE.md - proper ArrayList initialization
+            var ip_list = std.ArrayList([4]u8).init(self.allocator);
             errdefer ip_list.deinit(self.allocator);
 
             // Fixed BUG #7: member_count already includes new member, subtract 1
-            const member_count = network_config.?.members.count() - 1;
+            const member_count = network_config.members.count() - 1;
             // Fixed: STYLE.md 7.2 - guard integer casts to prevent panic
+            // Fixed: STYLE.md 4.3 - no silent truncation, % 256 redundant with u8 cast
             // Cap member count at 65535 (max for 10.147.x.x address space)
             const capped_count = @min(member_count, 65535);
-            const ip = [4]u8{ 10, 147, @intCast((capped_count / 256) % 256), @intCast(capped_count % 256) };
+            const high_byte: u8 = @intCast(capped_count / 256); // auto-wraps to 0-255
+            const low_byte: u8 = @intCast(capped_count); // auto-wraps to 0-255
+            const ip = [4]u8{ 10, 147, high_byte, low_byte };
             try ip_list.append(self.allocator, ip);
 
             member_result.value_ptr.* = .{
@@ -301,7 +305,7 @@ const Controller = struct {
         }
 
         // Send network config
-        try self.sendNetworkConfig(packet, from_addr, source, network_config.?, &shared_key, key_available);
+        try self.sendNetworkConfig(packet, from_addr, source, network_config, &shared_key, key_available);
     }
 
     fn sendNetworkConfig(
