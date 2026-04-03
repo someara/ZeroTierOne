@@ -239,6 +239,70 @@ pub fn build(b: *std.Build) void {
     bench_packets_step.dependOn(&run_bench_packets.step);
 
     // ---------------------------------------------------------------
+    // Integration Tests
+    // ---------------------------------------------------------------
+
+    // Timeout/Retry Test
+    const timeout_retry_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_timeout_retry_integration.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    timeout_retry_mod.addIncludePath(b.path("."));
+
+    const timeout_retry_exe = b.addExecutable(.{
+        .name = "test-timeout-retry",
+        .root_module = timeout_retry_mod,
+    });
+
+    b.installArtifact(timeout_retry_exe);
+
+    const run_timeout_retry = b.addRunArtifact(timeout_retry_exe);
+    run_timeout_retry.step.dependOn(b.getInstallStep());
+    const timeout_retry_step = b.step("test-timeout-retry", "Run timeout and retry logic tests");
+    timeout_retry_step.dependOn(&run_timeout_retry.step);
+
+    // Error Recovery Test
+    const error_recovery_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_error_recovery_integration.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    error_recovery_mod.addIncludePath(b.path("."));
+
+    const error_recovery_exe = b.addExecutable(.{
+        .name = "test-error-recovery",
+        .root_module = error_recovery_mod,
+    });
+
+    b.installArtifact(error_recovery_exe);
+
+    const run_error_recovery = b.addRunArtifact(error_recovery_exe);
+    run_error_recovery.step.dependOn(b.getInstallStep());
+    const error_recovery_step = b.step("test-error-recovery", "Run error recovery and adversarial tests");
+    error_recovery_step.dependOn(&run_error_recovery.step);
+
+    // Protocol Stress Test
+    const stress_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_stress_protocol.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    stress_mod.addIncludePath(b.path("."));
+
+    const stress_exe = b.addExecutable(.{
+        .name = "test-stress",
+        .root_module = stress_mod,
+    });
+
+    b.installArtifact(stress_exe);
+
+    const run_stress = b.addRunArtifact(stress_exe);
+    run_stress.step.dependOn(b.getInstallStep());
+    const stress_step = b.step("test-stress", "Run protocol stress tests (100 peers, 10k packets)");
+    stress_step.dependOn(&run_stress.step);
+
+    // ---------------------------------------------------------------
     // HTTP Client Test (`zig build test-http-client`)
     // ---------------------------------------------------------------
     // Test HTTP client against running zerotier-one service
