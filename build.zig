@@ -90,6 +90,7 @@ pub fn build(b: *std.Build) void {
         "src/test_aggressive_fuzz.zig",
         // io_uring fuzz tests
         "src/test_phy_uring_fuzz.zig",
+        "src/test_phy_uring_fuzz_extended.zig",
     };
 
     const test_step = b.step("test", "Run Zig module tests");
