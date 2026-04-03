@@ -116,11 +116,20 @@ pub fn main() !void {
     std.debug.print("    Packet ID: {}\n", .{hello_packet_id});
     std.debug.print("    Size: {} bytes\n", .{hello.buf.size()});
 
-    // Send it
-    std.debug.print("  Sending HELLO...\n", .{});
+    // Create client socket (we'll use this for both send and receive)
     const client_fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
     defer std.posix.close(client_fd);
 
+    // Bind to any port so we can receive responses
+    const client_bind_addr = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+    try std.posix.bind(client_fd, &client_bind_addr.any, client_bind_addr.getOsSockLen());
+
+    // Set non-blocking for receiving later
+    const client_flags = try std.posix.fcntl(client_fd, std.posix.F.GETFL, 0);
+    _ = try std.posix.fcntl(client_fd, std.posix.F.SETFL, client_flags | @as(i32, 0x04));
+
+    // Send HELLO
+    std.debug.print("  Sending HELLO...\n", .{});
     const hello_data = hello.buf.data();
     const sent = try std.posix.sendto(client_fd, hello_data, 0, &server_addr.any, server_addr.getOsSockLen());
     std.debug.print("    ✓ Sent {} bytes\n", .{sent});
@@ -248,29 +257,8 @@ pub fn main() !void {
     // PHASE 5: Client receives and decrypts HELLO OK
     // ═══════════════════════════════════════════════════════════
     std.debug.print("\n[Phase 5/5] Client receives HELLO OK\n", .{});
+    std.debug.print("  Waiting for HELLO OK on same client socket...\n", .{});
 
-    // Bind client socket to receive response
-    const client_recv_addr = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0); // any port
-    const client_recv_fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(client_recv_fd);
-    try std.posix.bind(client_recv_fd, &client_recv_addr.any, client_recv_addr.getOsSockLen());
-
-    // Get assigned port
-    var client_sock_addr: net.Address = undefined;
-    var client_sock_len: std.posix.socklen_t = @sizeOf(net.Address);
-    try std.posix.getsockname(client_recv_fd, &client_sock_addr.any, &client_sock_len);
-    const client_port = client_sock_addr.in.sa.port;
-    std.debug.print("  Client listening on port {}\n", .{client_port});
-
-    // Resend HELLO from this socket so server knows where to reply
-    std.debug.print("  Resending HELLO from new socket...\n", .{});
-    _ = try std.posix.sendto(client_recv_fd, hello_data, 0, &server_addr.any, server_addr.getOsSockLen());
-
-    // Set non-blocking
-    const client_flags = try std.posix.fcntl(client_recv_fd, std.posix.F.GETFL, 0);
-    _ = try std.posix.fcntl(client_recv_fd, std.posix.F.SETFL, client_flags | @as(i32, 0x04));
-
-    std.debug.print("  Waiting for HELLO OK...\n", .{});
     var received_ok = false;
     const ok_deadline = std.time.milliTimestamp() + 2000;
 
@@ -280,7 +268,7 @@ pub fn main() !void {
         var ok_from_len: std.posix.socklen_t = @sizeOf(net.Address);
 
         const ok_len = std.posix.recvfrom(
-            client_recv_fd,
+            client_fd, // Use same socket we sent from!
             &ok_buf,
             0,
             &ok_from.any,
