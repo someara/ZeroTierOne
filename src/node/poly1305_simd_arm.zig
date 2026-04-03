@@ -81,8 +81,9 @@ pub fn compute(
         // Final reduction: if h >= 2^130-5, subtract 2^130-5
         const c2: u64 = @truncate(h2 >> 2);
         h2 &= 3;
-        h0 +%= c2 * 5;
-        if (h0 < c2 * 5) h1 +%= 1;
+        const c2_times_5 = c2 *% 5;
+        h0 +%= c2_times_5;
+        if (h0 < c2_times_5) h1 +%= 1;
 
         remaining = remaining[16..];
     }
@@ -124,10 +125,11 @@ pub fn compute(
         h1 = @truncate(d1);
         h2 = @truncate(d2);
 
-        const c2: u64 = @truncate(h2 >> 2);
+        const c2_final: u64 = @truncate(h2 >> 2);
         h2 &= 3;
-        h0 +%= c2 * 5;
-        if (h0 < c2 * 5) h1 +%= 1;
+        const c2_final_times_5 = c2_final *% 5;
+        h0 +%= c2_final_times_5;
+        if (h0 < c2_final_times_5) h1 +%= 1;
     }
 
     // Final reduction: fully reduce h mod 2^130-5
