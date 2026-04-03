@@ -57,6 +57,34 @@ pub fn main() !void {
         }
     }
 
+    // Fixed BUG #28: Read environment variables set by Docker
+    // Docker-compose sets ROOT_SERVER, CONTROLLER, NETWORK_ID for container configuration
+    const root_server_env = std.process.getEnvVarOwned(allocator, "ROOT_SERVER") catch null;
+    defer if (root_server_env) |env| allocator.free(env);
+
+    const controller_env = std.process.getEnvVarOwned(allocator, "CONTROLLER") catch null;
+    defer if (controller_env) |env| allocator.free(env);
+
+    const network_id_env = std.process.getEnvVarOwned(allocator, "NETWORK_ID") catch null;
+    defer if (network_id_env) |env| allocator.free(env);
+
+    const role_env = std.process.getEnvVarOwned(allocator, "ROLE") catch null;
+    defer if (role_env) |env| allocator.free(env);
+
+    // Print configuration if environment variables are set
+    if (root_server_env) |root| {
+        std.debug.print("  Environment: ROOT_SERVER={s}\n", .{root});
+    }
+    if (controller_env) |ctrl| {
+        std.debug.print("  Environment: CONTROLLER={s}\n", .{ctrl});
+    }
+    if (network_id_env) |nwid| {
+        std.debug.print("  Environment: NETWORK_ID={s}\n", .{nwid});
+    }
+    if (role_env) |role| {
+        std.debug.print("  Environment: ROLE={s}\n", .{role});
+    }
+
     // Print banner
     printBanner();
 
@@ -83,6 +111,13 @@ pub fn main() !void {
             std.debug.print("  ⚠ Continuing without TUN device\n", .{});
         };
     }
+
+    // Join network if NETWORK_ID environment variable is set
+    // Fixed BUG #37: Implement network join logic
+    service.joinNetworkFromEnv() catch |err| {
+        std.debug.print("  ⚠ Network join failed: {}\n", .{err});
+        std.debug.print("  ⚠ Continuing without network (you can join via HTTP API)\n", .{});
+    };
 
     // Set up signal handler for graceful shutdown
     // TODO: Implement proper signal handling

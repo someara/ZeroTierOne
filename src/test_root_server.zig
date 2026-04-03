@@ -112,7 +112,11 @@ const RootServer = struct {
                     std.Thread.sleep(std.time.ns_per_ms);
                     continue;
                 },
-                else => return err,
+                // Fixed BUG #23: Don't abort on transient socket errors
+                else => {
+                    std.debug.print("Socket error: {}\n", .{err});
+                    continue;
+                },
             };
 
             packet_count += 1;
@@ -213,13 +217,30 @@ const RootServer = struct {
         }
 
         const client_identity = result.?.identity;
-        ptr = ptr + result.?.bytes_read;
+
+        // Fixed BUG #27: Validate ptr doesn't overflow on malicious input
+        const new_ptr = ptr + result.?.bytes_read;
+        if (new_ptr < ptr or new_ptr > pkt.max_packet_length) {
+            std.debug.print("    ❌ Invalid identity length (potential overflow)\n", .{});
+            return;
+        }
+        ptr = new_ptr;
 
         std.debug.print("    ✓ Parsed client identity: {}\n", .{client_identity.address()});
 
         // Store peer info
         const peer_addr_int = source._a;
-        var peer_info = PeerInfo{
+
+        // Fixed BUG #24: Free old identity if replacing existing peer
+        if (self.peers.get(peer_addr_int)) |old_peer| {
+            if (old_peer.identity) |*old_id| {
+                // Make a mutable copy to deinit
+                var old_id_mut = old_id.*;
+                old_id_mut.deinit();
+            }
+        }
+
+        const peer_info = PeerInfo{
             .address = source,
             .inet_addr = from_addr.*,
             .last_seen = std.time.milliTimestamp(),
@@ -228,8 +249,11 @@ const RootServer = struct {
 
         try self.peers.put(peer_addr_int, peer_info);
 
+        // Fixed BUG #25: Get pointer from HashMap after put (local peer_info is stale)
+        const stored_peer = self.peers.getPtr(peer_addr_int).?;
+
         // Compute shared key
-        if (!self.identity.agree(&peer_info.identity.?, shared_key)) {
+        if (!self.identity.agree(&stored_peer.identity.?, shared_key)) {
             std.debug.print("    ❌ Key agreement failed\n", .{});
             return;
         }
@@ -288,13 +312,17 @@ const RootServer = struct {
         hello_ok.armor(shared_key, false, false, null, null);
 
         const ok_data = hello_ok.buf.data();
-        const sent = try std.posix.sendto(
+        // Fixed BUG #26: Catch sendto() errors
+        const sent = std.posix.sendto(
             self.socket,
             ok_data,
             0,
             &to_addr.any,
             to_addr.getOsSockLen(),
-        );
+        ) catch |err| {
+            std.debug.print("    ❌ Failed to send HELLO OK: {}\n", .{err});
+            return;
+        };
 
         std.debug.print("    ✓ Sent HELLO OK ({} bytes)\n", .{sent});
     }
@@ -363,13 +391,17 @@ const RootServer = struct {
         ok.armor(shared_key, false, false, null, null);
 
         const ok_data = ok.buf.data();
-        const sent = try std.posix.sendto(
+        // Fixed BUG #26: Catch sendto() errors
+        const sent = std.posix.sendto(
             self.socket,
             ok_data,
             0,
             &to_addr.any,
             to_addr.getOsSockLen(),
-        );
+        ) catch |err| {
+            std.debug.print("    ❌ Failed to send WHOIS OK: {}\n", .{err});
+            return;
+        };
 
         std.debug.print("    ✓ Sent WHOIS OK ({} bytes)\n", .{sent});
     }

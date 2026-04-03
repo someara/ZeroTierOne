@@ -371,6 +371,38 @@ pub const Service = struct {
         std.debug.print("  ✓ TUN device configured\n", .{});
     }
 
+    /// Join a network by ID (reads from NETWORK_ID environment variable or takes explicit parameter)
+    /// Fixed BUG #37: Implement network join logic
+    pub fn joinNetworkFromEnv(self: *Service) !void {
+        // Read NETWORK_ID from environment
+        const network_id_str = std.process.getEnvVarOwned(self.allocator, "NETWORK_ID") catch |err| {
+            std.debug.print("  ⚠ No NETWORK_ID environment variable set: {}\n", .{err});
+            return;
+        };
+        defer self.allocator.free(network_id_str);
+
+        // Parse network ID (format: 0x8056c2e21c000001 or 8056c2e21c000001)
+        const trimmed = std.mem.trim(u8, network_id_str, &std.ascii.whitespace);
+        const hex_str = if (std.mem.startsWith(u8, trimmed, "0x"))
+            trimmed[2..]
+        else
+            trimmed;
+
+        const network_id = std.fmt.parseInt(u64, hex_str, 16) catch |err| {
+            std.debug.print("  ✗ Failed to parse NETWORK_ID '{s}': {}\n", .{ network_id_str, err });
+            return;
+        };
+
+        std.debug.print("Joining network 0x{x}...\n", .{network_id});
+
+        // Join the network
+        _ = try self.node.joinNetwork(network_id);
+        std.debug.print("  ✓ Network joined: 0x{x}\n", .{network_id});
+
+        // The node will automatically request network configuration from the controller
+        // via the NETWORK_CONFIG_REQUEST protocol
+    }
+
     /// Main event loop
     pub fn run(self: *Service) !void {
         std.debug.print("\n", .{});

@@ -313,8 +313,10 @@ pub const Identity = struct {
     /// Perform ECDH key agreement with another identity.
     ///
     /// Returns false if this identity has no private key.
+    /// Fixed BUG #30: Validate key_out buffer size (must be at least 32 bytes for typical usage)
     pub fn agree(self: *const Identity, other: *const Identity, key_out: []u8) bool {
         if (!self._has_private) return false;
+        if (key_out.len < 32) return false; // Prevent buffer overflow
         ecc.agree(&self._private_key, &other._public_key, key_out) catch return false;
         return true;
     }

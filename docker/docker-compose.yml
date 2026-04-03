@@ -45,6 +45,7 @@ services:
       - ROLE=client
       - ROOT_SERVER=172.20.0.10:9993
       - CONTROLLER=172.20.0.11:9993
+      - NETWORK_ID=0x8056c2e21c000001
     depends_on:
       - root-server
       - controller
@@ -65,6 +66,7 @@ services:
       - ROLE=client
       - ROOT_SERVER=172.20.0.10:9993
       - CONTROLLER=172.20.0.11:9993
+      - NETWORK_ID=0x8056c2e21c000001
     depends_on:
       - root-server
       - controller
