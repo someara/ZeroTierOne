@@ -17,6 +17,7 @@ const testing = std.testing;
 
 const Address = @import("address.zig").Address;
 const constants = @import("constants.zig");
+const Buffer = @import("buffer.zig").Buffer;
 const Identity = @import("identity.zig").Identity;
 const inet_address = @import("inet_address.zig");
 const InetAddress = inet_address.InetAddress;
@@ -28,6 +29,8 @@ const Peer = @import("peer.zig").Peer;
 const world_mod = @import("world.zig");
 const World = world_mod.World;
 const Root = world_mod.Root;
+
+const peer_state_capacity: u32 = 128;
 
 // ── Capacity Constants ──────────────────────────────────────────
 
@@ -152,16 +155,13 @@ const PathEntry = struct {
 
 // ── Callback Types ───────────────────────────────────────────────
 
-/// Callback for getting the current time in milliseconds.
-pub const NowCallback = *const fn (ctx: ?*anyopaque) i64;
-
 /// Callback for reading a state object.
 /// Returns the number of bytes read, or -1 on failure.
 pub const StateObjectGetCallback = *const fn (
     ctx: ?*anyopaque,
     t_ptr: ?*anyopaque,
     obj_type: u32,
-    id: [2]u64,
+    id: [*]const u64,
     data: [*]u8,
     max_len: u32,
 ) i32;
@@ -171,7 +171,7 @@ pub const StateObjectPutCallback = *const fn (
     ctx: ?*anyopaque,
     t_ptr: ?*anyopaque,
     obj_type: u32,
-    id: [2]u64,
+    id: [*]const u64,
     data: [*]const u8,
     len: u32,
 ) void;
@@ -181,7 +181,7 @@ pub const StateObjectDeleteCallback = *const fn (
     ctx: ?*anyopaque,
     t_ptr: ?*anyopaque,
     obj_type: u32,
-    id: [2]u64,
+    id: [*]const u64,
 ) void;
 
 // ── State Object Type Constants (from ZeroTierOne.h) ─────────────
@@ -225,11 +225,11 @@ pub const Topology = struct {
     _num_configured_physical_paths: u32,
 
     // -- Callbacks --
-    _now_fn: ?NowCallback,
+    _state_ctx: ?*anyopaque,
+    _t_ptr: ?*anyopaque,
     _state_get_fn: ?StateObjectGetCallback,
     _state_put_fn: ?StateObjectPutCallback,
     _state_delete_fn: ?StateObjectDeleteCallback,
-    _cb_ctx: ?*anyopaque,
 
     // ── Construction ──────────────────────────────────────────
 
@@ -259,24 +259,24 @@ pub const Topology = struct {
         self._physical_path_config = [_]PhysicalPathEntry{PhysicalPathEntry.init()} ** max_configurable_paths;
         self._num_configured_physical_paths = 0;
 
-        self._now_fn = null;
+        self._state_ctx = null;
+        self._t_ptr = null;
         self._state_get_fn = null;
         self._state_put_fn = null;
         self._state_delete_fn = null;
-        self._cb_ctx = null;
     }
 
     /// Set callbacks for Node integration.
     pub fn setCallbacks(
         self: *Topology,
-        ctx: ?*anyopaque,
-        now_fn: ?NowCallback,
+        state_ctx: ?*anyopaque,
+        t_ptr: ?*anyopaque,
         state_get_fn: ?StateObjectGetCallback,
         state_put_fn: ?StateObjectPutCallback,
         state_delete_fn: ?StateObjectDeleteCallback,
     ) void {
-        self._cb_ctx = ctx;
-        self._now_fn = now_fn;
+        self._state_ctx = state_ctx;
+        self._t_ptr = t_ptr;
         self._state_get_fn = state_get_fn;
         self._state_put_fn = state_put_fn;
         self._state_delete_fn = state_delete_fn;
@@ -340,6 +340,10 @@ pub const Topology = struct {
             if (entry.in_use and entry.addr.eql(zta)) {
                 return &entry.peer;
             }
+        }
+
+        if (self._loadPeerFromState(zta)) |peer| {
+            return peer;
         }
 
         return null;
@@ -872,6 +876,7 @@ pub const Topology = struct {
         }
 
         self._memoizeUpstreams();
+        self._storeWorldToState(new_world.*);
 
         return true;
     }
@@ -880,8 +885,11 @@ pub const Topology = struct {
     /// cached (via state callbacks), it will be loaded. Otherwise
     /// the seed is recorded for later contact.
     pub fn addMoon(self: *Topology, id: u64, seed: Address) void {
-        // In the full integration, this would try to load from
-        // stateObjectGet first. For now, just record the seed.
+        if (self._loadMoonFromState(id)) |moon| {
+            _ = self.addWorld(&moon, true);
+            return;
+        }
+
         if (seed.toInt() != 0) {
             self._upstreams_m.lock();
             defer self._upstreams_m.unlock();
@@ -937,6 +945,7 @@ pub const Topology = struct {
         }
 
         self._memoizeUpstreams();
+        self._deleteWorldState(state_object_moon, id);
     }
 
     // ── Periodic Tasks ───────────────────────────────────────
@@ -967,6 +976,12 @@ pub const Topology = struct {
                     }
                 }
             }
+        }
+
+        // Persist peers that were removed from memory so they can be
+        // reloaded on demand later.
+        if (self._state_put_fn != null) {
+            self._saveAllPeers(null);
         }
 
         // Clean paths: remove paths with no external references.
@@ -1147,6 +1162,108 @@ pub const Topology = struct {
             }
         }
         return false;
+    }
+
+    fn _stateObjectGet(self: *Topology, obj_type: u32, id: [2]u64, data: [*]u8, max_len: u32) i32 {
+        if (self._state_get_fn) |state_get| {
+            return state_get(self._state_ctx, self._t_ptr, obj_type, id, data, max_len);
+        }
+        return 0;
+    }
+
+    fn _stateObjectPut(self: *Topology, obj_type: u32, id: [2]u64, data: []const u8) void {
+        if (self._state_put_fn) |state_put| {
+            state_put(self._state_ctx, self._t_ptr, obj_type, id, data.ptr, @intCast(data.len));
+        }
+    }
+
+    fn _stateObjectDelete(self: *Topology, obj_type: u32, id: [2]u64) void {
+        if (self._state_delete_fn) |state_delete| {
+            state_delete(self._state_ctx, self._t_ptr, obj_type, id);
+        }
+    }
+
+    fn _storeWorldToState(self: *Topology, world: World) void {
+        if (self._state_put_fn == null) return;
+        var buf = Buffer(world_mod.max_serialized_length){};
+        if (world.serialize(world_mod.max_serialized_length, &buf, false)) |_| {
+            const id: [2]u64 = .{ world.id(), 0 };
+            self._stateObjectPut(if (world.worldType() == .planet) state_object_planet else state_object_moon, id, buf.data());
+        } else |_| {}
+    }
+
+    fn _loadMoonFromState(self: *Topology, id: u64) ?World {
+        var buf = Buffer(world_mod.max_serialized_length){};
+        const id_buf: [2]u64 = .{ id, 0 };
+        const n = self._stateObjectGet(state_object_moon, id_buf, buf.dataMut().ptr, world_mod.max_serialized_length);
+        if (n <= 0) return null;
+        if (buf.setSize(@as(u32, @intCast(n)))) |_| {} else |_| return null;
+        var moon = World.init();
+        if (moon.deserialize(world_mod.max_serialized_length, &buf, 0)) |consumed| {
+            if (consumed == @as(u32, @intCast(n)) and moon.worldType() == .moon and moon.id() == id) {
+                return moon;
+            }
+        } else |_| {}
+        return null;
+    }
+
+    fn _loadPeerFromState(self: *Topology, zta: Address) ?*Peer {
+        var buf = Buffer(peer_state_capacity){};
+        const id: [2]u64 = .{ zta.toInt(), 0 };
+        const n = self._stateObjectGet(state_object_peer, id, buf.dataMut().ptr, peer_state_capacity);
+        if (n <= 0) return null;
+        if (buf.setSize(@as(u32, @intCast(n)))) |_| {} else |_| return null;
+
+        const loaded = Peer.deserializeFromCache(self._now(), self._state_ctx, &buf, self._my_identity, self._state_put_fn, self._state_delete_fn) orelse return null;
+        return self._insertLoadedPeer(zta, loaded);
+    }
+
+    fn _insertLoadedPeer(self: *Topology, addr: Address, peer: Peer) ?*Peer {
+        self._peers_m.lock();
+        defer self._peers_m.unlock();
+
+        for (&self._peers) |*entry| {
+            if (!entry.in_use) {
+                entry.addr = addr;
+                entry.peer = peer;
+                entry.in_use = true;
+                self._peer_count += 1;
+                return &entry.peer;
+            }
+        }
+        return null;
+    }
+
+    fn _saveAllPeers(self: *Topology, t_ptr: ?*anyopaque) void {
+        if (self._state_put_fn == null) return;
+        self._peers_m.lock();
+        defer self._peers_m.unlock();
+        for (&self._peers) |*entry| {
+            if (entry.in_use) {
+                self._savePeer(t_ptr, &entry.peer);
+            }
+        }
+    }
+
+    fn _savePeer(self: *Topology, t_ptr: ?*anyopaque, peer: *const Peer) void {
+        if (self._state_put_fn == null) return;
+        var buf = Buffer(peer_state_capacity){};
+        if (peer.serializeForCache(peer_state_capacity, &buf)) |_| {
+            const id: [2]u64 = .{ peer.address().toInt(), 0 };
+            if (self._state_put_fn) |state_put| {
+                state_put(self._state_ctx, t_ptr, state_object_peer, id, buf.data().ptr, @intCast(buf.size()));
+            }
+        } else |_| {}
+    }
+
+    fn _deleteWorldState(self: *Topology, obj_type: u32, id: u64) void {
+        const id_buf: [2]u64 = .{ id, 0 };
+        self._stateObjectDelete(obj_type, id_buf);
+    }
+
+    fn _now(self: *Topology) i64 {
+        _ = self;
+        return std.time.milliTimestamp();
     }
 
     /// Ensure a peer entry exists for a root, including its stable endpoints as paths.

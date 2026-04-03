@@ -131,6 +131,13 @@ pub const Node = struct {
         errdefer allocator.destroy(topology);
 
         Topology.create(topology, &identity);
+        topology.setCallbacks(
+            callbacks.ctx,
+            t_ptr,
+            &Self.stateObjectGetCallback,
+            &Self.stateObjectPutCallback,
+            &Self.stateObjectDeleteCallback,
+        );
 
         // TODO: Initialize other subsystems
         // - Multicaster
@@ -735,6 +742,40 @@ pub const Node = struct {
     /// Post an event to the application.
     fn postEvent(self: *Self, t_ptr: ?*anyopaque, event_type: u32) void {
         self.callbacks.event(self.callbacks.ctx, t_ptr, event_type, null);
+    }
+
+    fn stateObjectGetCallback(
+        ctx: ?*anyopaque,
+        t_ptr: ?*anyopaque,
+        object_type: u32,
+        id: [2]u64,
+        data: [*]u8,
+        max_len: u32,
+    ) i32 {
+        const node: *Self = @ptrCast(@alignCast(ctx.?));
+        return node.callbacks.stateObjectGet(node.callbacks.ctx, t_ptr, object_type, &id, data, max_len);
+    }
+
+    fn stateObjectPutCallback(
+        ctx: ?*anyopaque,
+        t_ptr: ?*anyopaque,
+        object_type: u32,
+        id: [2]u64,
+        data: [*]const u8,
+        len: u32,
+    ) void {
+        const node: *Self = @ptrCast(@alignCast(ctx.?));
+        node.callbacks.stateObjectPut(node.callbacks.ctx, t_ptr, object_type, &id, data, len);
+    }
+
+    fn stateObjectDeleteCallback(
+        ctx: ?*anyopaque,
+        t_ptr: ?*anyopaque,
+        object_type: u32,
+        id: [2]u64,
+    ) void {
+        const node: *Self = @ptrCast(@alignCast(ctx.?));
+        node.callbacks.stateObjectDelete(node.callbacks.ctx, t_ptr, object_type, &id);
     }
 
     /// Create Switch callbacks that route to Node methods.
@@ -2102,7 +2143,9 @@ test "Node: expectReplyTo and isExpectingReplyTo" {
     const callbacks = Callbacks{
         .ctx = null,
         .stateObjectGet = struct {
-            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]u8, _: u32) i32 { return 0; }
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]u8, _: u32) i32 {
+                return 0;
+            }
         }.f,
         .stateObjectPut = struct {
             fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}
@@ -2149,7 +2192,9 @@ test "Node: expectReplyTo wraps ring buffer" {
     const callbacks = Callbacks{
         .ctx = null,
         .stateObjectGet = struct {
-            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]u8, _: u32) i32 { return 0; }
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]u8, _: u32) i32 {
+                return 0;
+            }
         }.f,
         .stateObjectPut = struct {
             fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}

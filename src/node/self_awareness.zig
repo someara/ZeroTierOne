@@ -227,7 +227,7 @@ pub const SelfAwareness = struct {
         const old_ts = entry.ts;
         const old_surface_differs = !entry.my_surface.ipsEqual(my_physical_address);
 
-        if (trusted and (now - old_ts) < entry_timeout and old_surface_differs and old_ts != 0) {
+        if (trusted and (now - old_ts) < entry_timeout and old_surface_differs) {
             // Address changed! Trusted peer reports different surface.
 
             // Notify trace
