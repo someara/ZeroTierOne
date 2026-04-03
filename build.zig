@@ -342,6 +342,26 @@ pub fn build(b: *std.Build) void {
     const real_handshake_step = b.step("test-real-handshake", "Test HELLO handshake with real root server (requires: zig build root-server)");
     real_handshake_step.dependOn(&run_real_handshake.step);
 
+    // Real Earth Connection Test
+    const earth_connection_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_real_earth_connection.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    earth_connection_mod.addIncludePath(b.path("."));
+
+    const earth_connection_exe = b.addExecutable(.{
+        .name = "test-earth-connection",
+        .root_module = earth_connection_mod,
+    });
+
+    b.installArtifact(earth_connection_exe);
+
+    const run_earth_connection = b.addRunArtifact(earth_connection_exe);
+    run_earth_connection.step.dependOn(b.getInstallStep());
+    const earth_connection_step = b.step("test-earth", "Connect to real ZeroTier Earth network root servers");
+    earth_connection_step.dependOn(&run_earth_connection.step);
+
     // ---------------------------------------------------------------
     // HTTP Client Test (`zig build test-http-client`)
     // ---------------------------------------------------------------
