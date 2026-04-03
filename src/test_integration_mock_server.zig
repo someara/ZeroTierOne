@@ -75,7 +75,7 @@ pub const MockRootServer = struct {
 
         // Set non-blocking
         const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
-        _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | @as(i32, std.posix.O.NONBLOCK));
+        _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | @as(i32, 0x04)); // O_NONBLOCK
 
         return MockRootServer{
             .allocator = allocator,
