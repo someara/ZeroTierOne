@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  # Root server - handles HELLO/OK handshakes
+  root-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.root-server
+    container_name: zt-root-server
+    networks:
+      zerotier-net:
+        ipv4_address: 172.20.0.10
+    ports:
+      - "9993:9993/udp"
+    stdin_open: true
+    tty: true
+
+  # Network controller - handles network config requests
+  controller:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.zig-zerotier
+    container_name: zt-controller
+    networks:
+      zerotier-net:
+        ipv4_address: 172.20.0.11
+    ports:
+      - "9994:9993/udp"
+      - "9994:9993/tcp"
+    environment:
+      - ROLE=controller
+    stdin_open: true
+    tty: true
+    command: ["/zerotier/zig-out/bin/zerotier-one", "-p", "9993"]
+
+  # Client 1
+  client1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.zig-zerotier
+    container_name: zt-client1
+    networks:
+      zerotier-net:
+        ipv4_address: 172.20.0.101
+    environment:
+      - ROLE=client
+      - ROOT_SERVER=172.20.0.10:9993
+    depends_on:
+      - root-server
+      - controller
+    stdin_open: true
+    tty: true
+    command: ["/zerotier/zig-out/bin/zerotier-one", "-p", "9993"]
+
+  # Client 2
+  client2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.zig-zerotier
+    container_name: zt-client2
+    networks:
+      zerotier-net:
+        ipv4_address: 172.20.0.102
+    environment:
+      - ROLE=client
+      - ROOT_SERVER=172.20.0.10:9993
+    depends_on:
+      - root-server
+      - controller
+    stdin_open: true
+    tty: true
+    command: ["/zerotier/zig-out/bin/zerotier-one", "-p", "9993"]
+
+networks:
+  zerotier-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

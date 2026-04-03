@@ -1,0 +1,26 @@
+FROM ubuntu:22.04
+
+# Install Zig
+RUN apt-get update && apt-get install -y \
+    wget \
+    xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN wget https://ziglang.org/download/0.15.2/zig-linux-x86_64-0.15.2.tar.xz \
+    && tar -xf zig-linux-x86_64-0.15.2.tar.xz \
+    && mv zig-linux-x86_64-0.15.2 /usr/local/zig \
+    && ln -s /usr/local/zig/zig /usr/local/bin/zig \
+    && rm zig-linux-x86_64-0.15.2.tar.xz
+
+WORKDIR /zerotier
+
+# Copy source code
+COPY src/ ./src/
+COPY build.zig ./
+
+# Build root server
+RUN zig build root-server
+
+EXPOSE 9993/udp
+
+CMD ["/zerotier/zig-out/bin/test-root-server"]

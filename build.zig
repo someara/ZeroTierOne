@@ -382,6 +382,26 @@ pub fn build(b: *std.Build) void {
     const earth_debug_step = b.step("test-earth-debug", "Debug Earth connection with packet hex dump");
     earth_debug_step.dependOn(&run_earth_debug.step);
 
+    // Network Controller
+    const controller_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_controller.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    controller_mod.addIncludePath(b.path("."));
+
+    const controller_exe = b.addExecutable(.{
+        .name = "test-controller",
+        .root_module = controller_mod,
+    });
+
+    b.installArtifact(controller_exe);
+
+    const run_controller = b.addRunArtifact(controller_exe);
+    run_controller.step.dependOn(b.getInstallStep());
+    const controller_step = b.step("controller", "Run ZeroTier network controller on localhost:9995");
+    controller_step.dependOn(&run_controller.step);
+
     // ---------------------------------------------------------------
     // HTTP Client Test (`zig build test-http-client`)
     // ---------------------------------------------------------------

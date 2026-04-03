@@ -1,0 +1,38 @@
+FROM ubuntu:22.04
+
+# Install Zig
+RUN apt-get update && apt-get install -y \
+    wget \
+    xz-utils \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and install Zig 0.15.2
+RUN wget https://ziglang.org/download/0.15.2/zig-linux-x86_64-0.15.2.tar.xz \
+    && tar -xf zig-linux-x86_64-0.15.2.tar.xz \
+    && mv zig-linux-x86_64-0.15.2 /usr/local/zig \
+    && ln -s /usr/local/zig/zig /usr/local/bin/zig \
+    && rm zig-linux-x86_64-0.15.2.tar.xz
+
+# Verify Zig installation
+RUN zig version
+
+# Set working directory
+WORKDIR /zerotier
+
+# Copy source code
+COPY src/ ./src/
+COPY build.zig ./
+
+# Build ZeroTier One (Zig implementation)
+RUN zig build service
+
+# Expose ZeroTier port
+EXPOSE 9993/udp
+EXPOSE 9993/tcp
+
+# Create data directory
+RUN mkdir -p /var/lib/zerotier-one
+
+# Default command
+CMD ["/zerotier/zig-out/bin/zerotier-one"]
