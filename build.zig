@@ -362,6 +362,26 @@ pub fn build(b: *std.Build) void {
     const earth_connection_step = b.step("test-earth", "Connect to real ZeroTier Earth network root servers");
     earth_connection_step.dependOn(&run_earth_connection.step);
 
+    // Earth Debug Test
+    const earth_debug_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_earth_debug.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    earth_debug_mod.addIncludePath(b.path("."));
+
+    const earth_debug_exe = b.addExecutable(.{
+        .name = "test-earth-debug",
+        .root_module = earth_debug_mod,
+    });
+
+    b.installArtifact(earth_debug_exe);
+
+    const run_earth_debug = b.addRunArtifact(earth_debug_exe);
+    run_earth_debug.step.dependOn(b.getInstallStep());
+    const earth_debug_step = b.step("test-earth-debug", "Debug Earth connection with packet hex dump");
+    earth_debug_step.dependOn(&run_earth_debug.step);
+
     // ---------------------------------------------------------------
     // HTTP Client Test (`zig build test-http-client`)
     // ---------------------------------------------------------------
