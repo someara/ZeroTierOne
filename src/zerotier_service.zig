@@ -335,10 +335,13 @@ pub const Service = struct {
         // Bind IPv6 socket
         const bind_addr_v6 = net.Address.initIp6([16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, self.primary_port, 0, 0);
         if (self.phy.udpBind(bind_addr_v6, self, 0)) |v6_sock| {
-            self.secondary_socks.append(self.allocator, v6_sock) catch {
-                self.phy.close(v6_sock, false);
-                std.debug.print("  ⚠ IPv6 socket bound but tracking failed (closed)\n", .{});
-                return;
+            // Fixed: STYLE.md 2.2 - OutOfMemory must propagate
+            self.secondary_socks.append(self.allocator, v6_sock) catch |err| switch (err) {
+                error.OutOfMemory => {
+                    self.phy.close(v6_sock, false);
+                    std.debug.print("  ⚠ Out of memory tracking IPv6 socket (closed)\n", .{});
+                    return error.OutOfMemory;
+                },
             };
             std.debug.print("  ✓ IPv6 socket bound\n", .{});
         } else |_| {

@@ -170,7 +170,12 @@ const RootServer = struct {
         var it = self.peers.iterator();
         while (it.next()) |entry| {
             if (now - entry.value_ptr.last_seen > timeout_ms) {
-                to_remove.append(entry.key_ptr.*) catch continue;
+                // Fixed: STYLE.md 2.2 - OutOfMemory must propagate
+                // If we can't track stale peers due to OOM, skip cleanup entirely
+                // rather than silently doing partial cleanup
+                to_remove.append(entry.key_ptr.*) catch |err| switch (err) {
+                    error.OutOfMemory => return, // Abort cleanup, retry next time
+                };
             }
         }
 

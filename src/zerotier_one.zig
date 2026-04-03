@@ -59,16 +59,29 @@ pub fn main() !void {
 
     // Fixed BUG #28: Read environment variables set by Docker
     // Docker-compose sets ROOT_SERVER, CONTROLLER, NETWORK_ID for container configuration
-    const root_server_env = std.process.getEnvVarOwned(allocator, "ROOT_SERVER") catch null;
+    // Fixed: STYLE.md 2.2 - OutOfMemory must propagate
+    const root_server_env = std.process.getEnvVarOwned(allocator, "ROOT_SERVER") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.EnvironmentVariableNotFound, error.InvalidWtf8 => null,
+    };
     defer if (root_server_env) |env| allocator.free(env);
 
-    const controller_env = std.process.getEnvVarOwned(allocator, "CONTROLLER") catch null;
+    const controller_env = std.process.getEnvVarOwned(allocator, "CONTROLLER") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.EnvironmentVariableNotFound, error.InvalidWtf8 => null,
+    };
     defer if (controller_env) |env| allocator.free(env);
 
-    const network_id_env = std.process.getEnvVarOwned(allocator, "NETWORK_ID") catch null;
+    const network_id_env = std.process.getEnvVarOwned(allocator, "NETWORK_ID") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.EnvironmentVariableNotFound, error.InvalidWtf8 => null,
+    };
     defer if (network_id_env) |env| allocator.free(env);
 
-    const role_env = std.process.getEnvVarOwned(allocator, "ROLE") catch null;
+    const role_env = std.process.getEnvVarOwned(allocator, "ROLE") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.EnvironmentVariableNotFound, error.InvalidWtf8 => null,
+    };
     defer if (role_env) |env| allocator.free(env);
 
     // Print configuration if environment variables are set
