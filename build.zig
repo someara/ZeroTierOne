@@ -84,6 +84,7 @@ pub fn build(b: *std.Build) void {
         "src/test_fragment_reassembly_regression.zig",
         "src/test_bug_hunting_regression.zig",
         // Integration tests
+        "src/test_integration_mock_server.zig",
         "src/test_critical_paths_integration.zig",
         "src/test_peer_to_peer_integration.zig",
         "src/test_peer_to_peer_fuzz.zig",
