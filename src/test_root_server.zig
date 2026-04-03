@@ -276,9 +276,12 @@ const RootServer = struct {
         ptr += 8;
 
         // Parse identity
+        // Note: deserialize returns null for any parse failure (truncated packet,
+        // invalid type byte, bad public key format). This is correct - we don't
+        // want to expose internal parser state to untrusted input.
         const result = Identity.deserialize(pkt.max_packet_length, &packet.buf, ptr);
         if (result == null) {
-            std.debug.print("    ❌ Failed to parse identity\n", .{});
+            std.debug.print("    ❌ Failed to parse identity (malformed or truncated)\n", .{});
             return;
         }
 
@@ -417,9 +420,12 @@ const RootServer = struct {
         }
 
         // Parse WHOIS payload - it's just a 40-bit ZeroTier address
-        const requested_addr = packet.buf.at(u64, pkt.idx_payload) catch {
-            std.debug.print("    ❌ Failed to parse requested address\n", .{});
-            return;
+        // Fixed: Exhaustive error handling per STYLE.md 2.1
+        const requested_addr = packet.buf.at(u64, pkt.idx_payload) catch |err| switch (err) {
+            error.OutOfBounds => {
+                std.debug.print("    ❌ WHOIS packet too short (truncated)\n", .{});
+                return;
+            },
         };
 
         const requested_address = Address{ ._a = requested_addr };

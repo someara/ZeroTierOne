@@ -245,9 +245,12 @@ const Controller = struct {
         }
 
         // Parse network ID from payload
-        const network_id = packet.buf.at(u64, pkt.idx_payload) catch {
-            std.debug.print("    ❌ Failed to parse network ID\n", .{});
-            return;
+        // Fixed: Exhaustive error handling per STYLE.md 2.1
+        const network_id = packet.buf.at(u64, pkt.idx_payload) catch |err| switch (err) {
+            error.OutOfBounds => {
+                std.debug.print("    ❌ NETWORK_CONFIG_REQUEST packet too short (truncated)\n", .{});
+                return;
+            },
         };
 
         std.debug.print("    Requested network: 0x{x}\n", .{network_id});
