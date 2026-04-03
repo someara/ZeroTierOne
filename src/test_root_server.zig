@@ -270,11 +270,14 @@ const RootServer = struct {
         // Parse HELLO payload to extract client identity
         var ptr: u32 = pkt.idx_payload;
 
-        // Skip protocol version, major, minor, revision
-        ptr += 1 + 1 + 1 + 2;
-
-        // Skip timestamp
-        ptr += 8;
+        // Fixed: STYLE.md 4.5 - validate pointer arithmetic stays within bounds
+        // Skip protocol version (1), major (1), minor (1), revision (2), timestamp (8) = 13 bytes
+        const header_size: u32 = 13;
+        if (ptr + header_size > pkt.max_packet_length) {
+            std.debug.print("    ❌ HELLO packet too short for header (need {} bytes)\n", .{header_size});
+            return;
+        }
+        ptr += header_size;
 
         // Parse identity
         // Note: deserialize returns null for any parse failure (truncated packet,

@@ -283,7 +283,10 @@ const Controller = struct {
 
             // Fixed BUG #7: member_count already includes new member, subtract 1
             const member_count = network_config.?.members.count() - 1;
-            const ip = [4]u8{ 10, 147, @intCast((member_count / 256) % 256), @intCast(member_count % 256) };
+            // Fixed: STYLE.md 7.2 - guard integer casts to prevent panic
+            // Cap member count at 65535 (max for 10.147.x.x address space)
+            const capped_count = @min(member_count, 65535);
+            const ip = [4]u8{ 10, 147, @intCast((capped_count / 256) % 256), @intCast(capped_count % 256) };
             try ip_list.append(self.allocator, ip);
 
             member_result.value_ptr.* = .{
@@ -331,7 +334,9 @@ const Controller = struct {
         // Get member's IP assignments
         const member = network_config.members.get(to_address._a);
         if (member) |m| {
-            try config_resp.buf.appendInt(u16, @intCast(m.ip_assignments.items.len));
+            // Fixed: STYLE.md 7.2 - guard cast, cap at u16 max
+            const ip_count = std.math.cast(u16, m.ip_assignments.items.len) orelse 65535;
+            try config_resp.buf.appendInt(u16, ip_count);
             for (m.ip_assignments.items) |ip| {
                 try config_resp.buf.appendByte(4, 1); // IPv4
                 try config_resp.buf.appendByte(8, 1); // metric
