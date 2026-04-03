@@ -29,8 +29,15 @@ COPY src/ ./src/
 COPY include/ ./include/
 COPY build.zig ./
 
-# Build root server
-RUN zig build root-server
+# Build only the root server binary (skip macOS-only targets)
+RUN zig build-exe \
+    -OReleaseSafe \
+    -I . \
+    -lc \
+    --name test-root-server \
+    src/test_root_server.zig \
+    && mkdir -p zig-out/bin \
+    && mv test-root-server zig-out/bin/
 
 EXPOSE 9993/udp
 

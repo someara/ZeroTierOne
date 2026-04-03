@@ -34,8 +34,15 @@ COPY src/ ./src/
 COPY include/ ./include/
 COPY build.zig ./
 
-# Build ZeroTier One (Zig implementation)
-RUN zig build service
+# Build only the service binary (skip macOS-only targets)
+RUN zig build-exe \
+    -OReleaseSafe \
+    -I . \
+    -lc \
+    --name zerotier-one \
+    src/zerotier_one.zig \
+    && mkdir -p zig-out/bin \
+    && mv zerotier-one zig-out/bin/
 
 # Expose ZeroTier port
 EXPOSE 9993/udp
