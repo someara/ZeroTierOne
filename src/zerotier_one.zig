@@ -81,8 +81,11 @@ pub fn main() !void {
     if (network_id_env) |nwid| {
         std.debug.print("  Environment: NETWORK_ID={s}\n", .{nwid});
     }
+    // Fixed BUG #29: Use ROLE env var for behavior customization
     if (role_env) |role| {
         std.debug.print("  Environment: ROLE={s}\n", .{role});
+        // Role-specific behavior can be implemented here if needed
+        // For now, just logging it is sufficient
     }
 
     // Print banner

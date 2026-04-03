@@ -35,6 +35,11 @@ const RootServer = struct {
     /// Peer tracking
     peers: std.AutoHashMap(u64, PeerInfo),
 
+    /// Fixed BUG #34: Track replied packet IDs to avoid duplicate replies
+    /// Ring buffer of last 1000 packet IDs (simple deduplication)
+    replied_packets: [1000]u64,
+    replied_packets_idx: usize,
+
     const PeerInfo = struct {
         address: Address,
         inet_addr: net.Address,
@@ -71,6 +76,8 @@ const RootServer = struct {
             .socket = sock,
             .allocator = allocator,
             .peers = std.AutoHashMap(u64, PeerInfo).init(allocator),
+            .replied_packets = [_]u64{0} ** 1000,
+            .replied_packets_idx = 0,
         };
     }
 
@@ -96,8 +103,15 @@ const RootServer = struct {
 
         var recv_buf: [4096]u8 = undefined;
         var packet_count: usize = 0;
+        var last_cleanup: i64 = std.time.milliTimestamp();
 
         while (true) {
+            // Fixed BUG #33: Periodic cleanup of stale peers (every 5 minutes)
+            const now = std.time.milliTimestamp();
+            if (now - last_cleanup > 300_000) { // 5 minutes in milliseconds
+                self.cleanupStalePeers(now);
+                last_cleanup = now;
+            }
             var from_addr: net.Address = undefined;
             var from_len: std.posix.socklen_t = @sizeOf(net.Address);
 
@@ -146,7 +160,53 @@ const RootServer = struct {
         }
     }
 
+    /// Fixed BUG #33: Clean up peers that haven't been seen in 5 minutes
+    fn cleanupStalePeers(self: *RootServer, now: i64) void {
+        const timeout_ms = 300_000; // 5 minutes
+        var to_remove = std.ArrayList(u64).init(self.allocator);
+        defer to_remove.deinit();
+
+        var it = self.peers.iterator();
+        while (it.next()) |entry| {
+            if (now - entry.value_ptr.last_seen > timeout_ms) {
+                to_remove.append(entry.key_ptr.*) catch continue;
+            }
+        }
+
+        if (to_remove.items.len > 0) {
+            std.debug.print("Cleaning up {} stale peers...\n", .{to_remove.items.len});
+            for (to_remove.items) |peer_addr| {
+                if (self.peers.fetchRemove(peer_addr)) |kv| {
+                    if (kv.value.identity) |*id| {
+                        var id_mut = id.*;
+                        id_mut.deinit();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fixed BUG #34: Check if we've already replied to this packet ID
+    fn hasReplied(self: *RootServer, packet_id: u64) bool {
+        for (self.replied_packets) |id| {
+            if (id == packet_id) return true;
+        }
+        return false;
+    }
+
+    fn markReplied(self: *RootServer, packet_id: u64) void {
+        self.replied_packets[self.replied_packets_idx] = packet_id;
+        self.replied_packets_idx = (self.replied_packets_idx + 1) % self.replied_packets.len;
+    }
+
     fn handlePacket(self: *RootServer, packet: *Packet, from_addr: *net.Address, source: Address) !void {
+        // Fixed BUG #34: Check for duplicate packets
+        const packet_id = packet.packetId();
+        if (self.hasReplied(packet_id)) {
+            std.debug.print("  → Ignoring duplicate packet (ID: {})\n", .{packet_id});
+            return;
+        }
+
         // Try to get shared key with sender
         const peer_addr_int = source._a;
         const peer_info = self.peers.get(peer_addr_int);
@@ -165,8 +225,14 @@ const RootServer = struct {
         const verb = packet.verb();
 
         switch (verb) {
-            .hello => try self.handleHello(packet, from_addr, source, key_available, &shared_key),
-            .whois => try self.handleWhois(packet, from_addr, source, key_available, &shared_key),
+            .hello => {
+                try self.handleHello(packet, from_addr, source, key_available, &shared_key);
+                self.markReplied(packet_id); // Mark after successful reply
+            },
+            .whois => {
+                try self.handleWhois(packet, from_addr, source, key_available, &shared_key);
+                self.markReplied(packet_id); // Mark after successful reply
+            },
             .ok => {
                 std.debug.print("  → Received OK (probably HELLO OK response)\n", .{});
                 // Client received our HELLO OK, handshake complete!
