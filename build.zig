@@ -302,6 +302,46 @@ pub fn build(b: *std.Build) void {
     const stress_step = b.step("test-stress", "Run protocol stress tests (100 peers, 10k packets)");
     stress_step.dependOn(&run_stress.step);
 
+    // Real Root Server
+    const root_server_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_root_server.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    root_server_mod.addIncludePath(b.path("."));
+
+    const root_server_exe = b.addExecutable(.{
+        .name = "test-root-server",
+        .root_module = root_server_mod,
+    });
+
+    b.installArtifact(root_server_exe);
+
+    const run_root_server = b.addRunArtifact(root_server_exe);
+    run_root_server.step.dependOn(b.getInstallStep());
+    const root_server_step = b.step("root-server", "Run real ZeroTier root server on localhost:9993");
+    root_server_step.dependOn(&run_root_server.step);
+
+    // Real Handshake Test (requires root server)
+    const real_handshake_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_real_handshake.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    real_handshake_mod.addIncludePath(b.path("."));
+
+    const real_handshake_exe = b.addExecutable(.{
+        .name = "test-real-handshake",
+        .root_module = real_handshake_mod,
+    });
+
+    b.installArtifact(real_handshake_exe);
+
+    const run_real_handshake = b.addRunArtifact(real_handshake_exe);
+    run_real_handshake.step.dependOn(b.getInstallStep());
+    const real_handshake_step = b.step("test-real-handshake", "Test HELLO handshake with real root server (requires: zig build root-server)");
+    real_handshake_step.dependOn(&run_real_handshake.step);
+
     // ---------------------------------------------------------------
     // HTTP Client Test (`zig build test-http-client`)
     // ---------------------------------------------------------------
