@@ -180,6 +180,7 @@ pub fn build(b: *std.Build) void {
         .name = "zerotier-one",
         .root_module = service_mod,
     });
+    service_exe.linkLibC();
 
     b.installArtifact(service_exe);
 
@@ -230,6 +231,7 @@ pub fn build(b: *std.Build) void {
         .name = "zerotier-bench-packets",
         .root_module = bench_packets_mod,
     });
+    bench_packets_exe.linkLibC();
 
     b.installArtifact(bench_packets_exe);
 
@@ -254,6 +256,7 @@ pub fn build(b: *std.Build) void {
         .name = "test-timeout-retry",
         .root_module = timeout_retry_mod,
     });
+    timeout_retry_exe.linkLibC();
 
     b.installArtifact(timeout_retry_exe);
 
@@ -274,6 +277,7 @@ pub fn build(b: *std.Build) void {
         .name = "test-error-recovery",
         .root_module = error_recovery_mod,
     });
+    error_recovery_exe.linkLibC();
 
     b.installArtifact(error_recovery_exe);
 
@@ -294,6 +298,7 @@ pub fn build(b: *std.Build) void {
         .name = "test-stress",
         .root_module = stress_mod,
     });
+    stress_exe.linkLibC();
 
     b.installArtifact(stress_exe);
 
@@ -314,6 +319,7 @@ pub fn build(b: *std.Build) void {
         .name = "test-root-server",
         .root_module = root_server_mod,
     });
+    root_server_exe.linkLibC();
 
     b.installArtifact(root_server_exe);
 
@@ -334,6 +340,7 @@ pub fn build(b: *std.Build) void {
         .name = "test-real-handshake",
         .root_module = real_handshake_mod,
     });
+    real_handshake_exe.linkLibC();
 
     b.installArtifact(real_handshake_exe);
 
@@ -354,6 +361,7 @@ pub fn build(b: *std.Build) void {
         .name = "test-earth-connection",
         .root_module = earth_connection_mod,
     });
+    earth_connection_exe.linkLibC();
 
     b.installArtifact(earth_connection_exe);
 
@@ -374,6 +382,7 @@ pub fn build(b: *std.Build) void {
         .name = "test-earth-debug",
         .root_module = earth_debug_mod,
     });
+    earth_debug_exe.linkLibC();
 
     b.installArtifact(earth_debug_exe);
 
@@ -394,6 +403,7 @@ pub fn build(b: *std.Build) void {
         .name = "test-controller",
         .root_module = controller_mod,
     });
+    controller_exe.linkLibC();
 
     b.installArtifact(controller_exe);
 
