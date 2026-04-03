@@ -52,6 +52,7 @@ const RootServer = struct {
 
         // Generate or load identity
         var identity = try Identity.generate(allocator);
+        errdefer identity.deinit(); // Fixed: STYLE.md 3.1 - immediate errdefer
         const address = identity.address();
 
         std.debug.print("  Root server identity: {}\n", .{address});

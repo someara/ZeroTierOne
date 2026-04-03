@@ -56,6 +56,7 @@ const Controller = struct {
         std.debug.print("Initializing network controller on port {}...\n", .{port});
 
         var identity = try Identity.generate(allocator);
+        errdefer identity.deinit(); // Fixed: STYLE.md 3.1 - immediate errdefer
         const address = identity.address();
 
         std.debug.print("  Controller identity: {}\n", .{address});
@@ -80,6 +81,14 @@ const Controller = struct {
             .networks = std.AutoHashMap(u64, NetworkConfig).init(allocator),
             .peers = std.AutoHashMap(u64, PeerInfo).init(allocator),
         };
+
+        // Fixed: STYLE.md 3.1 - errdefer for multi-resource initialization
+        errdefer {
+            std.posix.close(ctrl.socket);
+            ctrl.identity.deinit();
+            ctrl.networks.deinit();
+            ctrl.peers.deinit();
+        }
 
         // Create a test network
         try ctrl.createNetwork(0x8056c2e21c000001, "TestNetwork");
