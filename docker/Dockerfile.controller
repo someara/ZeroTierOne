@@ -1,0 +1,51 @@
+FROM ubuntu:22.04
+
+# Install Zig
+RUN apt-get update && apt-get install -y \
+    curl \
+    xz-utils \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and install Zig 0.15.2 (detect architecture)
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        ZIG_ARCH="x86_64"; \
+    elif [ "$ARCH" = "aarch64" ]; then \
+        ZIG_ARCH="aarch64"; \
+    else \
+        echo "Unsupported architecture: $ARCH" && exit 1; \
+    fi && \
+    curl -L -o zig.tar.xz https://ziglang.org/download/0.15.2/zig-${ZIG_ARCH}-linux-0.15.2.tar.xz && \
+    tar -xf zig.tar.xz && \
+    mv zig-${ZIG_ARCH}-linux-0.15.2 /usr/local/zig && \
+    ln -s /usr/local/zig/zig /usr/local/bin/zig && \
+    rm zig.tar.xz
+
+# Verify Zig installation
+RUN zig version
+
+# Set working directory
+WORKDIR /zerotier
+
+# Copy source code
+COPY src/ ./src/
+COPY include/ ./include/
+COPY build.zig ./
+
+# Build the controller binary
+RUN zig build-exe \
+    -OReleaseSafe \
+    -I . \
+    -lc \
+    --name test-controller \
+    src/test_controller.zig \
+    && mkdir -p zig-out/bin \
+    && mv test-controller zig-out/bin/
+
+# Expose ZeroTier port
+EXPOSE 9993/udp
+EXPOSE 9993/tcp
+
+# Default command
+CMD ["/zerotier/zig-out/bin/test-controller"]

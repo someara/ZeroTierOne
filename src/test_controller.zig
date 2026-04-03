@@ -91,8 +91,13 @@ const Controller = struct {
         std.posix.close(self.socket);
         self.identity.deinit();
 
+        // Fixed BUG #1: Free ip_assignments ArrayLists before deinit
         var net_it = self.networks.iterator();
         while (net_it.next()) |entry| {
+            var member_it = entry.value_ptr.members.iterator();
+            while (member_it.next()) |member_entry| {
+                member_entry.value_ptr.ip_assignments.deinit(self.allocator);
+            }
             entry.value_ptr.members.deinit();
         }
         self.networks.deinit();
@@ -144,7 +149,11 @@ const Controller = struct {
                     std.Thread.sleep(std.time.ns_per_ms);
                     continue;
                 },
-                else => return err,
+                // Fixed BUG #17: Don't abort on transient errors
+                else => {
+                    std.debug.print("Socket error: {}\n", .{err});
+                    continue;
+                },
             };
 
             packet_count += 1;
@@ -200,6 +209,13 @@ const Controller = struct {
         if (peer_info) |info| {
             shared_key = info.shared_key;
             key_available = true;
+        } else {
+            // NOTE BUG #9: Architectural issue - controller doesn't know peers!
+            // In real ZeroTier, controller and root server share peer database.
+            // For testing, we skip MAC validation for unknown peers.
+            // TODO: Either merge controller into root-server, or have clients
+            // include identity in NETWORK_CONFIG_REQUEST (non-standard).
+            std.debug.print("    ⚠️  Unknown peer, skipping MAC validation (INSECURE!)\n", .{});
         }
 
         // Try to dearmor
@@ -230,9 +246,15 @@ const Controller = struct {
         // Auto-authorize the member
         const member_result = try network_config.?.members.getOrPut(peer_addr_int);
         if (!member_result.found_existing) {
+            // Fixed BUG #16: Clean up on error
+            errdefer _ = network_config.?.members.remove(peer_addr_int);
+
             // New member - assign IP
             var ip_list = std.ArrayList([4]u8){};
-            const member_count = network_config.?.members.count();
+            errdefer ip_list.deinit(self.allocator);
+
+            // Fixed BUG #7: member_count already includes new member, subtract 1
+            const member_count = network_config.?.members.count() - 1;
             const ip = [4]u8{ 10, 147, @intCast((member_count / 256) % 256), @intCast(member_count % 256) };
             try ip_list.append(self.allocator, ip);
 
@@ -309,13 +331,17 @@ const Controller = struct {
         }
 
         const config_data = config_resp.buf.data();
-        const sent = try std.posix.sendto(
+        // Fixed BUG #18: Catch sendto errors
+        const sent = std.posix.sendto(
             self.socket,
             config_data,
             0,
             &to_addr.any,
             to_addr.getOsSockLen(),
-        );
+        ) catch |err| {
+            std.debug.print("    ❌ Failed to send NETWORK_CONFIG: {}\n", .{err});
+            return;
+        };
 
         std.debug.print("    ✓ Sent NETWORK_CONFIG ({} bytes)\n", .{sent});
     }
@@ -326,7 +352,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const port: u16 = 9995;
+    const port: u16 = 9993;  // Fixed: match Docker expectation
 
     var controller = try Controller.init(allocator, port);
     defer controller.deinit();

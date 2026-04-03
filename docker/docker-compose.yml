@@ -19,7 +19,7 @@ services:
   controller:
     build:
       context: ..
-      dockerfile: docker/Dockerfile.zig-zerotier
+      dockerfile: docker/Dockerfile.controller
     container_name: zt-controller
     networks:
       zerotier-net:
@@ -31,7 +31,6 @@ services:
       - ROLE=controller
     stdin_open: true
     tty: true
-    command: ["/zerotier/zig-out/bin/zerotier-one", "-p", "9993"]
 
   # Client 1
   client1:
@@ -45,6 +44,7 @@ services:
     environment:
       - ROLE=client
       - ROOT_SERVER=172.20.0.10:9993
+      - CONTROLLER=172.20.0.11:9993
     depends_on:
       - root-server
       - controller
@@ -64,6 +64,7 @@ services:
     environment:
       - ROLE=client
       - ROOT_SERVER=172.20.0.10:9993
+      - CONTROLLER=172.20.0.11:9993
     depends_on:
       - root-server
       - controller
