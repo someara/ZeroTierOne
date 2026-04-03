@@ -361,3 +361,128 @@ pub fn main() !void {
     std.debug.print("  ✓ Full handshake completes end-to-end\n", .{});
     std.debug.print("\n", .{});
 }
+
+// ═══════════════════════════════════════════════════════════
+// Bug Hunt Tests - Run automatically after main test
+// ═══════════════════════════════════════════════════════════
+
+fn testCorruptedMAC(allocator: std.mem.Allocator) !void {
+    std.debug.print("\n[Bug Hunt] Testing MAC with corrupted packet...\n", .{});
+    
+    var client_id = try Identity.generate(allocator);
+    defer client_id.deinit();
+    var server_id = try Identity.generate(allocator);
+    defer server_id.deinit();
+    
+    var key: [32]u8 = undefined;
+    if (!client_id.agree(&server_id, &key)) return error.KeyAgreementFailed;
+    
+    var hello = Packet.initNew(server_id.address(), client_id.address(), .hello);
+    try hello.buf.appendByte(42, 10); // Some payload
+    
+    // Armor
+    hello.armor(&key, false, false, null, null);
+    
+    // Corrupt payload
+    const orig = hello.buf.getByte(pkt.idx_payload) catch 0;
+    try hello.buf.setByte(pkt.idx_payload, orig ^ 0xFF);
+    
+    // Dearmor should fail
+    const valid = hello.dearmor(&key, null, null);
+    if (valid) {
+        std.debug.print("  ❌ BUG: MAC accepted corrupted packet!\n", .{});
+        return error.MacDidNotDetectCorruption;
+    }
+    std.debug.print("  ✅ MAC correctly rejected corrupted packet\n", .{});
+}
+
+fn testWrongKey(allocator: std.mem.Allocator) !void {
+    std.debug.print("\n[Bug Hunt] Testing MAC with wrong key...\n", .{});
+    
+    var client_id = try Identity.generate(allocator);
+    defer client_id.deinit();
+    var server_id = try Identity.generate(allocator);
+    defer server_id.deinit();
+    var wrong_id = try Identity.generate(allocator);
+    defer wrong_id.deinit();
+    
+    var key: [32]u8 = undefined;
+    var wrong_key: [32]u8 = undefined;
+    if (!client_id.agree(&server_id, &key)) return error.KeyAgreementFailed;
+    if (!client_id.agree(&wrong_id, &wrong_key)) return error.KeyAgreementFailed;
+    
+    var hello = Packet.initNew(server_id.address(), client_id.address(), .hello);
+    try hello.buf.appendByte(42, 10);
+    
+    // Armor with correct key
+    hello.armor(&key, false, false, null, null);
+    
+    // Try to dearmor with wrong key - should fail
+    const valid = hello.dearmor(&wrong_key, null, null);
+    if (valid) {
+        std.debug.print("  ❌ BUG: MAC accepted wrong key!\n", .{});
+        return error.MacDidNotDetectWrongKey;
+    }
+    std.debug.print("  ✅ MAC correctly rejected wrong key\n", .{});
+}
+
+fn testPacketIdUniqueness(allocator: std.mem.Allocator) !void {
+    std.debug.print("\n[Bug Hunt] Testing packet ID uniqueness...\n", .{});
+    
+    var client_id = try Identity.generate(allocator);
+    defer client_id.deinit();
+    var server_id = try Identity.generate(allocator);
+    defer server_id.deinit();
+    
+    // Create 100 packets, check IDs are unique
+    var ids = std.ArrayList(u64).init(allocator);
+    defer ids.deinit();
+    
+    for (0..100) |_| {
+        var pkt_test = Packet.initNew(server_id.address(), client_id.address(), .hello);
+        const id = pkt_test.packetId();
+        
+        // Check if ID already seen
+        for (ids.items) |seen_id| {
+            if (id == seen_id) {
+                std.debug.print("  ❌ BUG: Duplicate packet ID {}!\n", .{id});
+                return error.DuplicatePacketId;
+            }
+        }
+        try ids.append(id);
+    }
+    std.debug.print("  ✅ All 100 packet IDs unique\n", .{});
+}
+
+pub fn mainWithBugHunts() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    
+    // Run main test first
+    try main();
+    
+    // Run bug hunt tests
+    std.debug.print("\n" ++ "═" ** 60 ++ "\n", .{});
+    std.debug.print("  BUG HUNT TESTS\n", .{});
+    std.debug.print("═" ** 60 ++ "\n", .{});
+    
+    testCorruptedMAC(allocator) catch |err| {
+        std.debug.print("Bug hunt failed: {}\n", .{err});
+        return err;
+    };
+    
+    testWrongKey(allocator) catch |err| {
+        std.debug.print("Bug hunt failed: {}\n", .{err});
+        return err;
+    };
+    
+    testPacketIdUniqueness(allocator) catch |err| {
+        std.debug.print("Bug hunt failed: {}\n", .{err});
+        return err;
+    };
+    
+    std.debug.print("\n" ++ "═" ** 60 ++ "\n", .{});
+    std.debug.print("  ✅ ALL BUG HUNTS PASSED\n", .{});
+    std.debug.print("═" ** 60 ++ "\n\n", .{});
+}
