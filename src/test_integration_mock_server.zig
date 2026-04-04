@@ -9,7 +9,6 @@
 ///
 /// This exposes bugs that unit tests miss because they test isolated functions
 /// with mocked data, not the full protocol flow with real packet encoding/decoding.
-
 const std = @import("std");
 const testing = std.testing;
 const net = std.net;
@@ -46,7 +45,7 @@ pub const MockRootServer = struct {
     fd: std.posix.socket_t,
 
     // Packet tracking
-    packets_received: std.ArrayList(ReceivedPacket),
+    packets_received: std.array_list.Managed(ReceivedPacket),
 
     // Auto-responder settings
     auto_respond_hello: bool = true,
@@ -83,7 +82,7 @@ pub const MockRootServer = struct {
             .address = identity.address(),
             .sock = listen_addr,
             .fd = fd,
-            .packets_received = std.ArrayList(ReceivedPacket).init(allocator),
+            .packets_received = std.array_list.Managed(ReceivedPacket).init(allocator),
         };
     }
 
@@ -111,7 +110,7 @@ pub const MockRootServer = struct {
                 &src_addr_len,
             ) catch |err| switch (err) {
                 error.WouldBlock => {
-                    std.time.sleep(std.time.ns_per_ms);
+                    std.Thread.sleep(std.time.ns_per_ms);
                     continue;
                 },
                 else => return err,
@@ -127,7 +126,8 @@ pub const MockRootServer = struct {
     fn handleIncomingPacket(self: *MockRootServer, data: []const u8, from: net.Address) !void {
         // Check if it's a fragment
         if (data.len >= pkt.min_fragment_length and
-            data[pkt.frag_idx_fragment_indicator] == pkt.fragment_indicator) {
+            data[pkt.frag_idx_fragment_indicator] == pkt.fragment_indicator)
+        {
             std.debug.print("[MockServer] Received fragment (not implemented)\n", .{});
             return;
         }
@@ -138,8 +138,8 @@ pub const MockRootServer = struct {
         }
 
         // Parse packet header
-        var pkt_buf = Buffer.init();
-        try pkt_buf.append(data);
+        var pkt_buf = Buffer(pkt.max_packet_length){};
+        try pkt_buf.appendBytes(data);
 
         var packet = Packet{ .buf = pkt_buf };
 
@@ -204,7 +204,7 @@ pub const MockRootServer = struct {
     }
 
     fn sendHelloOk(self: *MockRootServer, to: Address, in_re_packet_id: u64, dest_addr: net.Address) !void {
-        std.debug.print("[MockServer] Sending HELLO OK to {} (in reply to packet {})\n", .{to, in_re_packet_id});
+        std.debug.print("[MockServer] Sending HELLO OK to {} (in reply to packet {})\n", .{ to, in_re_packet_id });
 
         // Build OK packet
         var response = Packet.initNew(to, self.address, .ok);
@@ -226,7 +226,7 @@ pub const MockRootServer = struct {
         try response.buf.appendInt(i64, now); // timestamp
 
         // External surface address (the address the client appears to be coming from)
-        var surface = InetAddress.InetAddress.initIp4(.{ 127, 0, 0, 1 }, 0);
+        var surface = InetAddress.initV4(.{ 127, 0, 0, 1 }, 0);
         try surface.serialize(pkt.max_packet_length, &response.buf);
 
         // World updates section (empty for now)
@@ -241,7 +241,7 @@ pub const MockRootServer = struct {
         response.armor(&dummy_key, false, false, null, null);
 
         // Send it
-        const packet_data = response.buf.constData();
+        const packet_data = response.buf.data();
         _ = try std.posix.sendto(
             self.fd,
             packet_data,
@@ -290,7 +290,7 @@ test "MockRootServer: Initialize and bind" {
     defer server.deinit();
 
     try testing.expect(server.fd != 0);
-    try testing.expect(server.address.value() != 0);
+    try testing.expect(server.address.toInt() != 0);
     std.debug.print("Mock server listening on port 19993, address: {}\n", .{server.address});
 }
 

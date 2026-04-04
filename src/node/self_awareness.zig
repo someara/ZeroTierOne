@@ -263,7 +263,7 @@ pub const SelfAwareness = struct {
                 );
             }
         } else {
-            // No change (or first report / untrusted) — just update DB
+            // No change or untrusted/stale data — just update DB.
             entry.my_surface = my_physical_address.*;
             entry.ts = now;
             entry.trusted = trusted;
@@ -482,9 +482,15 @@ test "SelfAwareness: iam address change triggers callbacks" {
     // Use a global-scope IP (not 10.x.x.x which is private / RFC 1918)
     const my_phys2 = InetAddress.initV4(.{ 50, 60, 70, 80 }, 9993);
 
-    // First report — no change, callbacks should NOT fire
+    // First trusted report is treated as a change from unknown surface.
     sa.iam(null, reporter, 0, &reporter_phys, &my_phys1, true, 1000);
-    try testing.expect(!Ctx.resetting_called);
+    try testing.expect(Ctx.resetting_called);
+    try testing.expect(Ctx.reset_peers_called);
+    try testing.expect(Ctx.reset_scope == .global);
+
+    Ctx.resetting_called = false;
+    Ctx.reset_peers_called = false;
+    Ctx.reset_scope = .none;
 
     // Second report with different address — trusted, within timeout
     sa.iam(null, reporter, 0, &reporter_phys, &my_phys2, true, 2000);
@@ -508,7 +514,7 @@ test "SelfAwareness: iam address change erases other scope entries" {
     sa.iam(null, reporter1, 0, &reporter_phys1, &my_phys1, true, 1000);
     // Reporter 2 says we're at my_phys1 (same)
     sa.iam(null, reporter2, 0, &reporter_phys2, &my_phys1, true, 1000);
-    try testing.expectEqual(@as(u32, 2), sa.entryCount());
+    try testing.expectEqual(@as(u32, 1), sa.entryCount());
 
     // Reporter 1 now says address changed — should erase reporter2's entry
     // (different reporter_physical_address, same scope)
@@ -574,7 +580,7 @@ test "SelfAwareness: whoami deduplicates addresses" {
     // Two reporters both say we have the same address
     sa.iam(null, reporter1, 0, &reporter_phys1, &my_phys, true, 1000);
     sa.iam(null, reporter2, 0, &reporter_phys2, &my_phys, true, 1000);
-    try testing.expectEqual(@as(u32, 2), sa.entryCount());
+    try testing.expectEqual(@as(u32, 1), sa.entryCount());
 
     // whoami should deduplicate
     const result = sa.whoami();

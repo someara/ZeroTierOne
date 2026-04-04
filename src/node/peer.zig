@@ -155,6 +155,17 @@ pub const PeerRedirectedCallback = *const fn (
     path: *Path,
 ) void;
 
+/// Callback for contacting a peer at a specific address.
+pub const PeerAttemptToContactAtCallback = *const fn (
+    ctx: ?*anyopaque,
+    t_ptr: ?*anyopaque,
+    peer: ?*anyopaque,
+    local_socket: i64,
+    at_addr: *const InetAddress,
+    now: i64,
+    always_send_hello: bool,
+) void;
+
 // ── PeerPath ──────────────────────────────────────────────────────
 
 /// A path slot tracked per-peer. Stores a pointer to the Path,
@@ -279,6 +290,7 @@ pub const Peer = struct {
     _external_path_lookup_fn: ?ExternalPathLookupCallback,
     _put_packet_fn: ?PutPacketCallback,
     _peer_redirected_fn: ?PeerRedirectedCallback,
+    _attempt_to_contact_at_fn: ?PeerAttemptToContactAtCallback,
     _cb_ctx: ?*anyopaque,
 
     // -- Reference counting --
@@ -351,6 +363,7 @@ pub const Peer = struct {
         self._external_path_lookup_fn = null;
         self._put_packet_fn = null;
         self._peer_redirected_fn = null;
+        self._attempt_to_contact_at_fn = null;
         self._cb_ctx = null;
 
         // Reference counting
@@ -374,6 +387,7 @@ pub const Peer = struct {
         external_path_lookup: ?ExternalPathLookupCallback,
         put_packet: ?PutPacketCallback,
         peer_redirected: ?PeerRedirectedCallback,
+        attempt_to_contact_at: ?PeerAttemptToContactAtCallback,
     ) void {
         self._cb_ctx = ctx;
         self._learned_new_path_fn = learned_new_path;
@@ -382,6 +396,7 @@ pub const Peer = struct {
         self._external_path_lookup_fn = external_path_lookup;
         self._put_packet_fn = put_packet;
         self._peer_redirected_fn = peer_redirected;
+        self._attempt_to_contact_at_fn = attempt_to_contact_at;
     }
 
     // ── Identity / Address ────────────────────────────────────
@@ -773,15 +788,15 @@ pub const Peer = struct {
     ///
     /// Sends an ECHO to affected paths and deactivates them until
     /// they respond. Used when external IP changes are detected.
-    pub fn resetWithinScope(self: *Peer, scope: IpScope, inet_address_family: std.c.sa_family_t, now: i64) void {
+    pub fn resetWithinScope(self: *Peer, t_ptr: ?*anyopaque, scope: IpScope, inet_address_family: std.c.sa_family_t, now: i64) void {
         self._paths_m.lock();
         defer self._paths_m.unlock();
         for (&self._paths) |*pp| {
             if (pp.p) |p| {
                 if (p.address().family() == inet_address_family and p.ipScope() == scope) {
-                    // Mark the path as needing re-confirmation.
-                    // In the full integration, we would call attemptToContactAt()
-                    // here to send an ECHO. For now, just reset the lr time.
+                    if (self._attempt_to_contact_at_fn) |cb| {
+                        cb(self._cb_ctx, t_ptr, @ptrCast(self), p.localSocket(), p.address(), now, false);
+                    }
                     p.sent(now);
                     pp.lr = 0; // path won't be used until it responds
                 }
@@ -795,12 +810,18 @@ pub const Peer = struct {
     /// priority and removes lower-priority or duplicate paths.
     pub fn clusterRedirect(
         self: *Peer,
+        t_ptr: ?*anyopaque,
         new_path: *Path,
         originating_path: ?*Path,
         now: i64,
     ) void {
         if (self._peer_redirected_fn) |cb| {
-            cb(self._cb_ctx, null, 0, self._id.address(), new_path);
+            cb(self._cb_ctx, t_ptr, 0, self._id.address(), new_path);
+        }
+
+        if (self._attempt_to_contact_at_fn) |cb| {
+            const local_socket = if (originating_path) |orig| orig.localSocket() else new_path.localSocket();
+            cb(self._cb_ctx, t_ptr, @ptrCast(self), local_socket, new_path.address(), now, true);
         }
 
         self._paths_m.lock();
@@ -1399,7 +1420,7 @@ test "Peer: resetWithinScope" {
     try testing.expect(peer.addPath(&path, 1000));
 
     // Reset global scope — should deactivate the path
-    peer.resetWithinScope(.global, std.c.AF.INET, 2000);
+    peer.resetWithinScope(null, .global, std.c.AF.INET, 2000);
 
     // Path should still exist but lr should be 0 (deactivated)
     try testing.expectEqual(@as(u32, 1), peer.totalPathCount());
@@ -1461,7 +1482,7 @@ test "Peer: clusterRedirect" {
     try testing.expect(peer.addPath(&path1, 1000));
 
     // Redirect to path2 via path1
-    peer.clusterRedirect(&path2, &path1, 2000);
+    peer.clusterRedirect(null, &path2, &path1, 2000);
 
     // path2 should be present with elevated priority
     var found = false;
@@ -1538,6 +1559,7 @@ test "Peer: setCallbacks" {
             return true;
         }
         fn peerRedirected(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: Address, _: *Path) void {}
+        fn attemptToContactAt(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: i64, _: bool) void {}
     };
 
     var dummy: u8 = 42;
@@ -1549,6 +1571,7 @@ test "Peer: setCallbacks" {
         &Ctx.externalPathLookup,
         &Ctx.putPacket,
         &Ctx.peerRedirected,
+        &Ctx.attemptToContactAt,
     );
 
     try testing.expect(peer._learned_new_path_fn != null);

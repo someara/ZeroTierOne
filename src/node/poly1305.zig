@@ -2,26 +2,13 @@
 ///
 /// Converted from `node/Poly1305.hpp` and `node/Poly1305.cpp`.
 ///
-/// On ARM64, uses optimized NEON implementation for better performance.
-/// On other platforms, falls back to Zig's standard library implementation.
+/// Uses Zig's standard library implementation.
 ///
 /// Poly1305 takes a one-time-use 32-byte key and produces a 16-byte
 /// message authentication code. The key MUST NOT be reused for
 /// different messages. In ZeroTier's protocol, the first 32 bytes of
 /// the Salsa20/12 keystream serve as the one-time key.
 const std = @import("std");
-const builtin = @import("builtin");
-
-// Platform-specific optimized implementation
-const simd_arm = if (builtin.cpu.arch == .aarch64)
-    @import("poly1305_simd_arm.zig")
-else
-    struct {
-        pub fn compute(_: *[16]u8, _: []const u8, _: *const [32]u8) void {
-            @panic("ARM64 Poly1305 not available on this platform");
-        }
-    };
-
 // ── Public constants ───────────────────────────────────────────────
 
 pub const key_len: comptime_int = 32;
@@ -43,14 +30,7 @@ pub fn compute(
     data: []const u8,
     key: *const [key_len]u8,
 ) void {
-    // Use ARM64 implementation for all buffers on ARM64
-    // Performance: ~2160 MiB/s (C++ baseline: 2803 MiB/s, ~77% of target)
-    // Optimizations: Inlined multiplication, reduced function calls
-    if (builtin.cpu.arch == .aarch64) {
-        simd_arm.compute(auth, data, key);
-    } else {
-        Poly1305.create(auth, data, key);
-    }
+    Poly1305.create(auth, data, key);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -179,8 +159,6 @@ test "streaming API matches one-shot" {
 }
 
 test "SIMD debug - single block (16 bytes)" {
-    if (builtin.cpu.arch != .aarch64) return error.SkipZigTest;
-
     const input = [_]u8{0} ** 16; // Single block
     const key = [32]u8{
         0x74, 0x68, 0x69, 0x73, 0x20, 0x69, 0x73, 0x20,
@@ -189,27 +167,15 @@ test "SIMD debug - single block (16 bytes)" {
         0x50, 0x6f, 0x6c, 0x79, 0x31, 0x33, 0x30, 0x35,
     };
 
-    // Test stdlib
     var result_stdlib: [16]u8 = undefined;
     Poly1305.create(&result_stdlib, &input, &key);
-
-    // Test SIMD
-    var result_simd: [16]u8 = undefined;
-    simd_arm.compute(&result_simd, &input, &key);
-
-    std.debug.print("\n16-byte test:\n", .{});
-    std.debug.print("Stdlib:  ", .{});
-    for (result_stdlib) |b| std.debug.print("{x:0>2}", .{b});
-    std.debug.print("\nSIMD:    ", .{});
-    for (result_simd) |b| std.debug.print("{x:0>2}", .{b});
-    std.debug.print("\n", .{});
-
-    try std.testing.expectEqualSlices(u8, &result_stdlib, &result_simd);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        0xfc, 0x27, 0xbd, 0x24, 0xce, 0xb2, 0x02, 0x21,
+        0x0c, 0xee, 0x24, 0x7c, 0xc7, 0x04, 0xaf, 0x35,
+    }, &result_stdlib);
 }
 
-test "SIMD debug - test vector 0 with SIMD" {
-    if (builtin.cpu.arch != .aarch64) return error.SkipZigTest;
-
+test "selftest vector 0 matches expected" {
     const input = [_]u8{0} ** 32;
     const key = [32]u8{
         0x74, 0x68, 0x69, 0x73, 0x20, 0x69, 0x73, 0x20,
@@ -222,22 +188,8 @@ test "SIMD debug - test vector 0 with SIMD" {
         0xc2, 0x6b, 0x33, 0xb9, 0x1c, 0xcc, 0x03, 0x07,
     };
 
-    // Test stdlib
     var result_stdlib: [16]u8 = undefined;
     Poly1305.create(&result_stdlib, &input, &key);
 
-    // Test SIMD
-    var result_simd: [16]u8 = undefined;
-    simd_arm.compute(&result_simd, &input, &key);
-
-    std.debug.print("\n32-byte test:\n", .{});
-    std.debug.print("Stdlib:  ", .{});
-    for (result_stdlib) |b| std.debug.print("{x:0>2}", .{b});
-    std.debug.print("\nSIMD:    ", .{});
-    for (result_simd) |b| std.debug.print("{x:0>2}", .{b});
-    std.debug.print("\nExpected:", .{});
-    for (expected) |b| std.debug.print("{x:0>2}", .{b});
-    std.debug.print("\n", .{});
-
-    try std.testing.expectEqualSlices(u8, &expected, &result_simd);
+    try std.testing.expectEqualSlices(u8, &expected, &result_stdlib);
 }

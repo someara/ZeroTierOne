@@ -744,40 +744,6 @@ pub const Node = struct {
         self.callbacks.event(self.callbacks.ctx, t_ptr, event_type, null);
     }
 
-    fn stateObjectGetCallback(
-        ctx: ?*anyopaque,
-        t_ptr: ?*anyopaque,
-        object_type: u32,
-        id: [2]u64,
-        data: [*]u8,
-        max_len: u32,
-    ) i32 {
-        const node: *Self = @ptrCast(@alignCast(ctx.?));
-        return node.callbacks.stateObjectGet(node.callbacks.ctx, t_ptr, object_type, &id, data, max_len);
-    }
-
-    fn stateObjectPutCallback(
-        ctx: ?*anyopaque,
-        t_ptr: ?*anyopaque,
-        object_type: u32,
-        id: [2]u64,
-        data: [*]const u8,
-        len: u32,
-    ) void {
-        const node: *Self = @ptrCast(@alignCast(ctx.?));
-        node.callbacks.stateObjectPut(node.callbacks.ctx, t_ptr, object_type, &id, data, len);
-    }
-
-    fn stateObjectDeleteCallback(
-        ctx: ?*anyopaque,
-        t_ptr: ?*anyopaque,
-        object_type: u32,
-        id: [2]u64,
-    ) void {
-        const node: *Self = @ptrCast(@alignCast(ctx.?));
-        node.callbacks.stateObjectDelete(node.callbacks.ctx, t_ptr, object_type, &id);
-    }
-
     /// Create Switch callbacks that route to Node methods.
     fn createSwitchCallbacks(self: *Self) @import("switch.zig").Callbacks {
         const SwitchCallbacks = @import("switch.zig").Callbacks;
