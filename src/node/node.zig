@@ -128,9 +128,12 @@ pub const Node = struct {
 
         // Initialize Topology
         const topology = try allocator.create(Topology);
-        errdefer allocator.destroy(topology);
+        errdefer {
+            topology.deinit();
+            allocator.destroy(topology);
+        }
 
-        Topology.create(topology, &identity);
+        try Topology.create(topology, allocator, &identity);
         topology.setCallbacks(
             callbacks.ctx,
             t_ptr,

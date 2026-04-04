@@ -5,21 +5,14 @@
 /// remote InetAddress}. It tracks timing (last in/out, trust expiry),
 /// latency, and bond-related quality metrics.
 ///
-/// Path objects are reference-counted via `SharedPtr` and stored in
-/// `Topology`'s path hash table keyed by `HashKey`.
-///
-/// No heap allocation is performed by this struct itself. It is a value
-/// type designed to be heap-allocated and managed by `SharedPtr`.
 const std = @import("std");
 const mem = std.mem;
 const testing = std.testing;
 
-const AtomicCounter = @import("atomic_counter.zig");
 const constants = @import("constants.zig");
 const inet_address = @import("inet_address.zig");
 const InetAddress = inet_address.InetAddress;
 const IpScope = inet_address.IpScope;
-const shared_ptr = @import("shared_ptr.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 
@@ -189,11 +182,6 @@ pub const Path = struct {
     /// Memoized IP scope (computed from _addr at construction).
     _ip_scope: IpScope,
 
-    // -- Reference counting for SharedPtr --
-
-    /// Intrusive reference count for SharedPtr management.
-    __ref_count: shared_ptr.RefCount,
-
     // ── Construction ──────────────────────────────────────────
 
     /// Create a default/null path (all fields zeroed or at defaults).
@@ -220,7 +208,6 @@ pub const Path = struct {
             ._latency = 0xffff,
             ._addr = InetAddress.zero(),
             ._ip_scope = .none,
-            .__ref_count = .{},
         };
     }
 

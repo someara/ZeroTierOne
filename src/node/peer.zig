@@ -32,7 +32,6 @@ const Verb = pkt.Verb;
 const path_mod = @import("path.zig");
 const Path = path_mod.Path;
 const sha512 = @import("sha512.zig");
-const shared_ptr = @import("shared_ptr.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 
@@ -293,11 +292,6 @@ pub const Peer = struct {
     _attempt_to_contact_at_fn: ?PeerAttemptToContactAtCallback,
     _cb_ctx: ?*anyopaque,
 
-    // -- Reference counting --
-
-    /// Intrusive reference count for SharedPtr management.
-    __ref_count: shared_ptr.RefCount,
-
     // ── Construction ──────────────────────────────────────────
 
     /// Create a new Peer from our identity and the remote peer's identity.
@@ -365,9 +359,6 @@ pub const Peer = struct {
         self._peer_redirected_fn = null;
         self._attempt_to_contact_at_fn = null;
         self._cb_ctx = null;
-
-        // Reference counting
-        self.__ref_count = .{};
 
         return self;
     }

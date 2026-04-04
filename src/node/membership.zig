@@ -113,9 +113,6 @@ pub const Membership = struct {
     /// Remote certificates of ownership indexed by COO ID.
     _remote_coos: Hashtable(u32, CertificateOfOwnership),
 
-    /// Allocator used for hashtable storage.
-    _allocator: std.mem.Allocator,
-
     // ── Constructor / Destructor ──────────────────────────
 
     pub fn init(allocator: std.mem.Allocator) Membership {
@@ -128,7 +125,6 @@ pub const Membership = struct {
             ._remote_tags = Hashtable(u32, Tag).init(allocator),
             ._remote_caps = Hashtable(u32, Capability).init(allocator),
             ._remote_coos = Hashtable(u32, CertificateOfOwnership).init(allocator),
-            ._allocator = allocator,
         };
     }
 

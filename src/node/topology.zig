@@ -7,9 +7,9 @@
 /// Cross-module calls to Node are deferred until the later switching/node
 /// phases.
 ///
-/// Peers and paths are stored in bounded fixed-size arrays rather than
-/// heap-allocated hash tables. This limits the maximum number of concurrent
-/// peers and paths but avoids heap allocation in the struct itself.
+/// Peers and paths are stored in heap-backed slices allocated once during
+/// create(). This keeps the topology object itself small while preserving
+/// stable peer/path addresses for the rest of the runtime.
 const std = @import("std");
 const mem = std.mem;
 const testing = std.testing;
@@ -60,6 +60,36 @@ pub const min_physmtu: u32 = 510;
 
 /// Maximum physical MTU.
 pub const max_physmtu: u32 = 10000;
+
+// ── Persistence Callbacks ────────────────────────────────────────
+
+/// Optional host hooks used for world persistence.
+pub const Callbacks = struct {
+    ctx: ?*anyopaque = null,
+    t_ptr: ?*anyopaque = null,
+    stateObjectGet: ?*const fn (
+        ctx: ?*anyopaque,
+        t_ptr: ?*anyopaque,
+        object_type: u32,
+        id: [*]const u64,
+        data: [*]u8,
+        max_len: u32,
+    ) i32 = null,
+    stateObjectPut: ?*const fn (
+        ctx: ?*anyopaque,
+        t_ptr: ?*anyopaque,
+        object_type: u32,
+        id: [*]const u64,
+        data: [*]const u8,
+        len: u32,
+    ) void = null,
+    stateObjectDelete: ?*const fn (
+        ctx: ?*anyopaque,
+        t_ptr: ?*anyopaque,
+        object_type: u32,
+        id: [*]const u64,
+    ) void = null,
+};
 
 // ── Peer Role ────────────────────────────────────────────────────
 
@@ -168,13 +198,19 @@ pub const Topology = struct {
     // -- Our identity (needed for self-check in various lookups) --
     _my_identity: Identity,
 
+    // -- Allocator backing peer/path storage --
+    _allocator: mem.Allocator,
+
+    // -- Optional host persistence hooks --
+    _callbacks: Callbacks,
+
     // -- Peers --
-    _peers: [max_peers]PeerEntry,
+    _peers: []PeerEntry,
     _peer_count: u32,
     _peers_m: Mutex,
 
     // -- Canonical paths --
-    _paths: [max_paths]PathEntry,
+    _paths: []PathEntry,
     _path_count: u32,
     _paths_m: Mutex,
 
@@ -196,18 +232,17 @@ pub const Topology = struct {
     // ── Construction ──────────────────────────────────────────
 
     /// Create a new Topology database.
-    /// Initializes the topology in-place to avoid stack overflow from large arrays.
-    pub fn create(self: *Topology, my_identity: *const Identity) void {
+    /// Initializes the topology in-place with heap-backed peer/path tables.
+    pub fn create(self: *Topology, allocator: mem.Allocator, my_identity: *const Identity) !void {
         self._my_identity = my_identity.*;
-
-        self._peers = [_]PeerEntry{PeerEntry.init()} ** max_peers;
+        self._allocator = allocator;
+        self._callbacks = .{};
+        self._peers = &[_]PeerEntry{};
+        self._paths = &[_]PathEntry{};
         self._peer_count = 0;
-        self._peers_m = .{};
-
-        self._paths = [_]PathEntry{PathEntry.init()} ** max_paths;
         self._path_count = 0;
+        self._peers_m = .{};
         self._paths_m = .{};
-
         self._planet = World.init();
         self._moons = [_]World{World.init()} ** max_moons;
         self._moon_count = 0;
@@ -217,20 +252,59 @@ pub const Topology = struct {
         self._upstream_count = 0;
         self._am_upstream = false;
         self._upstreams_m = .{};
-
         self._physical_path_config = [_]PhysicalPathEntry{PhysicalPathEntry.init()} ** max_configurable_paths;
         self._num_configured_physical_paths = 0;
+
+        const peers = try allocator.alloc(PeerEntry, max_peers);
+        errdefer allocator.free(peers);
+        for (peers) |*entry| entry.* = PeerEntry.init();
+
+        const paths = try allocator.alloc(PathEntry, max_paths);
+        errdefer allocator.free(paths);
+        for (paths) |*entry| entry.* = PathEntry.init();
+
+        self._peers = peers;
+        self._paths = paths;
+    }
+
+    /// Set persistence callbacks used for world updates.
+    pub fn setCallbacks(
+        self: *Topology,
+        ctx: ?*anyopaque,
+        t_ptr: ?*anyopaque,
+        state_object_get: ?*const fn (?*anyopaque, ?*anyopaque, u32, [*]const u64, [*]u8, u32) i32,
+        state_object_put: ?*const fn (?*anyopaque, ?*anyopaque, u32, [*]const u64, [*]const u8, u32) void,
+        state_object_delete: ?*const fn (?*anyopaque, ?*anyopaque, u32, [*]const u64) void,
+    ) void {
+        self._callbacks = .{
+            .ctx = ctx,
+            .t_ptr = t_ptr,
+            .stateObjectGet = state_object_get,
+            .stateObjectPut = state_object_put,
+            .stateObjectDelete = state_object_delete,
+        };
     }
 
     /// Clean up — wipe key material from all peers.
     pub fn deinit(self: *Topology) void {
-        for (&self._peers) |*entry| {
+        for (self._peers) |*entry| {
             if (entry.in_use) {
                 entry.peer.deinit();
                 entry.in_use = false;
             }
         }
         self._peer_count = 0;
+
+        if (self._peers.len != 0) {
+            self._allocator.free(self._peers);
+        }
+
+        if (self._paths.len != 0) {
+            self._allocator.free(self._paths);
+        }
+
+        self._peers = &[_]PeerEntry{};
+        self._paths = &[_]PathEntry{};
     }
 
     // ── Peer Management ──────────────────────────────────────
@@ -246,14 +320,14 @@ pub const Topology = struct {
         const addr = peer._id.address();
 
         // Check if already present
-        for (&self._peers) |*entry| {
+        for (self._peers) |*entry| {
             if (entry.in_use and entry.addr.eql(addr)) {
                 return &entry.peer;
             }
         }
 
         // Find an empty slot
-        for (&self._peers) |*entry| {
+        for (self._peers) |*entry| {
             if (!entry.in_use) {
                 entry.addr = addr;
                 entry.peer = peer.*;
@@ -276,7 +350,7 @@ pub const Topology = struct {
         self._peers_m.lock();
         defer self._peers_m.unlock();
 
-        for (&self._peers) |*entry| {
+        for (self._peers) |*entry| {
             if (entry.in_use and entry.addr.eql(zta)) {
                 return &entry.peer;
             }
@@ -290,7 +364,7 @@ pub const Topology = struct {
         self._peers_m.lock();
         defer self._peers_m.unlock();
 
-        for (&self._peers) |*entry| {
+        for (self._peers) |*entry| {
             if (entry.in_use and entry.addr.eql(zta)) {
                 return &entry.peer;
             }
@@ -309,7 +383,7 @@ pub const Topology = struct {
         self._peers_m.lock();
         defer self._peers_m.unlock();
 
-        for (&self._peers) |*entry| {
+        for (self._peers) |*entry| {
             if (entry.in_use and entry.addr.eql(zta)) {
                 return entry.peer.identity();
             }
@@ -323,7 +397,7 @@ pub const Topology = struct {
         self._peers_m.lock();
         defer self._peers_m.unlock();
 
-        for (&self._peers) |*entry| {
+        for (self._peers) |*entry| {
             if (entry.in_use and entry.addr.eql(zta)) {
                 entry.peer.deinit();
                 entry.in_use = false;
@@ -347,7 +421,7 @@ pub const Topology = struct {
         defer self._peers_m.unlock();
 
         var cnt: u32 = 0;
-        for (&self._peers) |*entry| {
+        for (self._peers) |*entry| {
             if (entry.in_use) {
                 if (entry.peer.getAppropriatePath(now, false) != null) {
                     cnt += 1;
@@ -364,7 +438,7 @@ pub const Topology = struct {
         defer self._peers_m.unlock();
 
         var count: u32 = 0;
-        for (&self._peers) |*entry| {
+        for (self._peers) |*entry| {
             if (entry.in_use and count < out.len) {
                 out[count] = entry.addr;
                 count += 1;
@@ -385,14 +459,14 @@ pub const Topology = struct {
         defer self._paths_m.unlock();
 
         // Look for existing
-        for (&self._paths) |*entry| {
+        for (self._paths) |*entry| {
             if (entry.in_use and entry.key.eql(key)) {
                 return &entry.path;
             }
         }
 
         // Create new
-        for (&self._paths) |*entry| {
+        for (self._paths) |*entry| {
             if (!entry.in_use) {
                 entry.key = key;
                 entry.path = Path.initWithAddress(local_socket, remote_addr.*);
@@ -422,7 +496,6 @@ pub const Topology = struct {
     /// Lock order: _upstreams_m before _peers_m (must be consistent
     /// with getRootsToContact, sendWhoisRequest, _memoizeUpstreams).
     pub fn getUpstreamPeer(self: *Topology, now: i64) ?*Peer {
-        _ = now;
         // Lock order: _upstreams_m first, then _peers_m
         self._upstreams_m.lock();
         defer self._upstreams_m.unlock();
@@ -432,13 +505,11 @@ pub const Topology = struct {
         var best: ?*Peer = null;
         var best_q: u32 = std.math.maxInt(u32);
 
-        const current_now = if (self._now_fn) |now_fn| now_fn(self._cb_ctx) else @as(i64, 0);
-
         for (0..self._upstream_count) |i| {
             const addr = self._upstream_addresses[i];
-            for (&self._peers) |*entry| {
+            for (self._peers) |*entry| {
                 if (entry.in_use and entry.addr.eql(addr)) {
-                    const q = entry.peer.relayQuality(current_now);
+                    const q = entry.peer.relayQuality(now);
                     if (q <= best_q) {
                         best_q = q;
                         best = &entry.peer;
@@ -873,6 +944,7 @@ pub const Topology = struct {
         }
 
         self._memoizeUpstreams();
+        self._deleteWorldFromState(id, .moon);
     }
 
     // ── Periodic Tasks ───────────────────────────────────────
@@ -886,7 +958,7 @@ pub const Topology = struct {
             self._upstreams_m.lock();
             defer self._upstreams_m.unlock();
 
-            for (&self._peers) |*entry| {
+            for (self._peers) |*entry| {
                 if (entry.in_use and !entry.peer.isAlive(now)) {
                     // Don't remove upstream peers
                     var is_up = false;
@@ -905,11 +977,10 @@ pub const Topology = struct {
             }
         }
 
-        // Clean paths: remove paths with no external references.
-        // Since we don't have SharedPtr reference counting in the Zig
-        // conversion, we skip this for now. In the full integration,
-        // paths that are no longer referenced by any peer would be
-        // collected here.
+        // Paths are owned by the topology and held by peers as borrowed
+        // pointers. Retiring them safely needs explicit handle invalidation,
+        // so that cleanup remains deferred until the ownership model is
+        // tightened.
     }
 
     // ── Physical Path Configuration ──────────────────────────
@@ -1026,7 +1097,7 @@ pub const Topology = struct {
 
     /// Find a peer by address. Assumes _peers_m is already locked.
     fn _findPeerLocked(self: *Topology, addr: Address) ?*Peer {
-        for (&self._peers) |*entry| {
+        for (self._peers) |*entry| {
             if (entry.in_use and entry.addr.eql(addr)) {
                 return &entry.peer;
             }
@@ -1101,7 +1172,7 @@ pub const Topology = struct {
 
         // Check if peer already exists
         var existing_peer: ?*Peer = null;
-        for (&self._peers) |*entry| {
+        for (self._peers) |*entry| {
             if (entry.in_use and entry.addr.eql(addr)) {
                 existing_peer = &entry.peer;
                 break;
@@ -1111,7 +1182,7 @@ pub const Topology = struct {
         // Create new peer if needed
         if (existing_peer == null) {
             if (Peer.create(&self._my_identity, root_identity)) |peer| {
-                for (&self._peers) |*entry| {
+                for (self._peers) |*entry| {
                     if (!entry.in_use) {
                         entry.addr = addr;
                         entry.peer = peer;
@@ -1143,6 +1214,35 @@ pub const Topology = struct {
         }
     }
 
+    /// Persist a world update if callbacks are configured.
+    fn _storeWorldToState(self: *Topology, world: World) void {
+        const put = self._callbacks.stateObjectPut orelse return;
+        const object_type = switch (world.worldType()) {
+            .planet => state_object_planet,
+            .moon => state_object_moon,
+            else => return,
+        };
+
+        var buf = Buffer(world_mod.max_serialized_length){};
+        if (world.serialize(world_mod.max_serialized_length, &buf, false)) |_| {
+            const id_key: [2]u64 = .{ world.id(), 0 };
+            put(self._callbacks.ctx, self._callbacks.t_ptr, object_type, &id_key, buf.data().ptr, buf.size());
+        } else |_| {}
+    }
+
+    /// Delete a persisted world if callbacks are configured.
+    fn _deleteWorldFromState(self: *Topology, id: u64, world_type: world_mod.Type) void {
+        const delete = self._callbacks.stateObjectDelete orelse return;
+        const object_type = switch (world_type) {
+            .planet => state_object_planet,
+            .moon => state_object_moon,
+            else => return,
+        };
+
+        const id_key: [2]u64 = .{ id, 0 };
+        delete(self._callbacks.ctx, self._callbacks.t_ptr, object_type, &id_key);
+    }
+
     /// Remove a moon seed at the given index.
     fn _removeMoonSeedAt(self: *Topology, idx: usize) void {
         var j: u32 = @intCast(idx);
@@ -1158,7 +1258,7 @@ pub const Topology = struct {
 // Helper: heap-allocate a Topology so the ~5 MB struct doesn't blow the stack.
 fn createTestTopology(my_id: *const Identity) !*Topology {
     const topo = try testing.allocator.create(Topology);
-    topo.create(my_id);
+    try topo.create(testing.allocator, my_id);
     return topo;
 }
 

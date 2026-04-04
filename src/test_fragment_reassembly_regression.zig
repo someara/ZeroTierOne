@@ -139,7 +139,7 @@ const FragmentReassembler = struct {
     }
 
     /// Reassemble complete packet (concatenate all fragment payloads)
-    pub fn reassemble(self: *FragmentReassembler) ![]const u8 {
+    pub fn reassemble(self: *FragmentReassembler, allocator: std.mem.Allocator) ![]u8 {
         if (!self.complete) return error.Incomplete;
 
         // Start with head data
@@ -161,7 +161,9 @@ const FragmentReassembler = struct {
             }
         }
 
-        return buffer[0..pos];
+        const result = try allocator.alloc(u8, pos);
+        @memcpy(result, buffer[0..pos]);
+        return result;
     }
 };
 
@@ -194,7 +196,8 @@ test "Fragment reassembly regression - in-order arrival" {
     try testing.expect(reassembler.complete); // Now complete!
 
     // Reassemble and verify
-    const result = try reassembler.reassemble();
+    const result = try reassembler.reassemble(testing.allocator);
+    defer testing.allocator.free(result);
 
     // Should be: 50 (frag0) + 14 (frag1 payload) + 9 (frag2 payload) = 73 bytes
     try testing.expectEqual(@as(usize, 73), result.len);

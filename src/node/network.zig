@@ -14,7 +14,6 @@ const mem = std.mem;
 const testing = std.testing;
 
 const Address = @import("address.zig").Address;
-const AtomicCounter = @import("atomic_counter.zig");
 const Buffer = @import("buffer.zig").Buffer;
 const Capability = @import("capability.zig").Capability;
 const com_mod = @import("certificate_of_membership.zig");
@@ -322,7 +321,6 @@ pub const Callbacks = struct {
 /// A joined virtual network.
 ///
 /// Fields prefixed with `_` are internal state protected by `_lock`.
-/// The `__ref_count` field is used by SharedPtr for reference counting.
 pub const Network = struct {
     // ── Immutable (set at init, never changed) ───────────
 
@@ -406,10 +404,6 @@ pub const Network = struct {
 
     _lock: Mutex,
 
-    // ── SharedPtr reference counting ─────────────────────
-
-    __ref_count: AtomicCounter,
-
     // ── Allocator ────────────────────────────────────────
 
     _allocator: std.mem.Allocator,
@@ -462,7 +456,6 @@ pub const Network = struct {
             ._incoming_packets_dropped = 0,
             ._callbacks = callbacks,
             ._lock = .{},
-            .__ref_count = .{},
             ._allocator = allocator,
         };
     }
