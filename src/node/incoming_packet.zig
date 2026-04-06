@@ -3047,7 +3047,7 @@ pub fn ipv6GetPayload(
     var pos: u32 = 40;
     var proto: u32 = frame_data[6];
 
-    while (pos <= frame_data.len) {
+    while (pos < frame_data.len) {
         switch (proto) {
             0, // hop-by-hop options
             43, // routing
