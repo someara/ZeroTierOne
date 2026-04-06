@@ -524,13 +524,166 @@ test "two nodes communicate on same network" {
     try testing.expect(test_ctx_a.packets_sent > 0);
     try testing.expect(test_ctx_b.packets_sent > 0);
 
+    // Step 10: Node A sends ECHO packet to Node B
+    std.debug.print("\nStep 10: Node A sending ECHO to Node B...\n", .{});
+
+    // Create ECHO packet
+    var echo_pkt = Packet.initNew(node_b.identity.address(), node_a.identity.address(), .echo);
+
+    const echo_payload = "test_echo_data_between_peers";
+    try echo_pkt.buf.appendBytes(echo_payload);
+
+    // Get Node B's peer entry from Node A's topology
+    const peer_b_entry = node_a.topology.getPeer(node_b.identity.address());
+    if (peer_b_entry == null) {
+        std.debug.print("  ❌ Node A: Cannot find Node B in topology\n", .{});
+        return error.PeerNotFound;
+    }
+
+    // Armor packet with Node A → Node B shared key
+    const shared_key_ab = peer_b_entry.?.key();
+    echo_pkt.armor(shared_key_ab[0..32], true, false, null, null);
+
+    // Send via Node A's wireSend callback
+    const echo_data = echo_pkt.buf.data();
+    const echo_len: u32 = @intCast(echo_pkt.buf.size());
+
+    testWireSend(
+        @ptrCast(&test_ctx_a),
+        null,
+        now,
+        &path_to_b,
+        echo_data.ptr,
+        echo_len,
+        -1,
+    );
+
+    std.debug.print("  ✓ ECHO packet sent ({} bytes)\n", .{echo_len});
+
+    // Step 11: Node B receives and processes ECHO
+    std.debug.print("\nStep 11: Node B receiving ECHO...\n", .{});
+
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+
+    var echo_recv_buf: [4096]u8 = undefined;
+    var echo_from_addr: net.Address = undefined;
+    var echo_from_len: std.posix.socklen_t = @sizeOf(net.Address);
+
+    const echo_recv_len = std.posix.recvfrom(
+        socket_b,
+        &echo_recv_buf,
+        0,
+        &echo_from_addr.any,
+        &echo_from_len,
+    ) catch |err| {
+        std.debug.print("  ❌ Node B failed to receive ECHO: {}\n", .{err});
+        return error.ReceiveFailed;
+    };
+
+    std.debug.print("  ✓ Node B received {} bytes\n", .{echo_recv_len});
+
+    // Parse ECHO packet
+    var echo_pkt_buf: PacketBuffer = .{};
+    try echo_pkt_buf.copyFrom(echo_recv_buf[0..echo_recv_len]);
+    var received_echo = Packet{ .buf = echo_pkt_buf };
+
+    // Get Node A's peer entry from Node B's topology
+    const peer_a_entry = node_b.topology.getPeer(node_a.identity.address());
+    if (peer_a_entry == null) {
+        std.debug.print("  ❌ Node B: Cannot find Node A in topology\n", .{});
+        return error.PeerNotFound;
+    }
+
+    // Dearmor ECHO packet
+    const shared_key_ba = peer_a_entry.?.key();
+    const echo_mac_valid = received_echo.dearmor(shared_key_ba[0..32], null, null);
+    if (!echo_mac_valid) {
+        std.debug.print("  ❌ Node B: Invalid ECHO MAC\n", .{});
+        return error.InvalidMAC;
+    }
+
+    std.debug.print("  ✓ ECHO packet dearmored, MAC valid\n", .{});
+
+    const echo_verb = received_echo.verb();
+    try testing.expect(echo_verb == .echo);
+    std.debug.print("  ✓ Verb verified: ECHO\n", .{});
+
+    // Node B sends OK(ECHO) response
+    std.debug.print("  → Node B sending OK(ECHO) response...\n", .{});
+
+    var ok_pkt = Packet.initNew(node_a.identity.address(), node_b.identity.address(), .ok);
+    try ok_pkt.buf.appendByte(@intFromEnum(pkt_mod.Verb.echo), 1); // in-re ECHO
+    try ok_pkt.buf.appendInt(u64, received_echo.packetId()); // in-re packet ID
+
+    // Armor response
+    ok_pkt.armor(shared_key_ba[0..32], true, false, null, null);
+
+    const ok_data = ok_pkt.buf.data();
+    const ok_len: u32 = @intCast(ok_pkt.buf.size());
+
+    testWireSend(
+        @ptrCast(&test_ctx_b),
+        null,
+        now,
+        &path_to_a,
+        ok_data.ptr,
+        ok_len,
+        -1,
+    );
+
+    std.debug.print("  ✓ OK(ECHO) sent ({} bytes)\n", .{ok_len});
+
+    // Step 12: Node A receives OK(ECHO)
+    std.debug.print("\nStep 12: Node A receiving OK(ECHO)...\n", .{});
+
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+
+    var ok_recv_buf: [4096]u8 = undefined;
+    var ok_from_addr: net.Address = undefined;
+    var ok_from_len: std.posix.socklen_t = @sizeOf(net.Address);
+
+    const ok_recv_len = std.posix.recvfrom(
+        socket_a,
+        &ok_recv_buf,
+        0,
+        &ok_from_addr.any,
+        &ok_from_len,
+    ) catch |err| {
+        std.debug.print("  ❌ Node A failed to receive OK: {}\n", .{err});
+        return error.ReceiveFailed;
+    };
+
+    std.debug.print("  ✓ Node A received {} bytes\n", .{ok_recv_len});
+
+    // Parse OK packet
+    var ok_pkt_buf: PacketBuffer = .{};
+    try ok_pkt_buf.copyFrom(ok_recv_buf[0..ok_recv_len]);
+    var received_ok = Packet{ .buf = ok_pkt_buf };
+
+    // Dearmor OK packet
+    const ok_mac_valid = received_ok.dearmor(shared_key_ab[0..32], null, null);
+    if (!ok_mac_valid) {
+        std.debug.print("  ❌ Node A: Invalid OK MAC\n", .{});
+        return error.InvalidMAC;
+    }
+
+    std.debug.print("  ✓ OK packet dearmored, MAC valid\n", .{});
+
+    const ok_verb = received_ok.verb();
+    try testing.expect(ok_verb == .ok);
+    std.debug.print("  ✓ Verb verified: OK\n", .{});
+
+    // Final verification
     std.debug.print("\n" ++ "═" ** 70 ++ "\n", .{});
-    std.debug.print("Test PASSED: Two nodes on same network!\n", .{});
+    std.debug.print("Test PASSED: Two nodes communicated via ECHO!\n", .{});
     std.debug.print("✓ Both nodes joined network 0x{x}\n", .{test_network_id});
-    std.debug.print("✓ Both nodes received configs with IPs\n", .{});
+    std.debug.print("✓ Both nodes received configs with IPs (10.147.0.0, 10.147.0.1)\n", .{});
     std.debug.print("✓ Both nodes added each other as peers\n", .{});
-    std.debug.print("✓ Node A sent {} packet(s)\n", .{test_ctx_a.packets_sent});
-    std.debug.print("✓ Node B sent {} packet(s)\n", .{test_ctx_b.packets_sent});
-    std.debug.print("Next: Add ECHO packet exchange to prove peer-to-peer communication\n", .{});
+    std.debug.print("✓ Node A sent ECHO to Node B\n", .{});
+    std.debug.print("✓ Node B received ECHO (MAC valid, verb verified)\n", .{});
+    std.debug.print("✓ Node B sent OK(ECHO) response\n", .{});
+    std.debug.print("✓ Node A received OK (MAC valid, verb verified)\n", .{});
+    std.debug.print("✓ Encrypted peer-to-peer communication VERIFIED\n", .{});
+    std.debug.print("✓ Total packets: Node A={}, Node B={}\n", .{ test_ctx_a.packets_sent, test_ctx_b.packets_sent });
     std.debug.print("═" ** 70 ++ "\n\n", .{});
 }
