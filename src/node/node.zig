@@ -615,15 +615,17 @@ pub const Node = struct {
 
     /// Destroy the Node instance.
     pub fn deinit(self: *Self) void {
-        // Clean up networks
-        self.networks_mutex.lock();
-        defer self.networks_mutex.unlock();
-        var iter = self.networks.valueIterator();
-        while (iter.next()) |net_ptr| {
-            net_ptr.*.deinit();
-            self.allocator.destroy(net_ptr.*);
+        // Clean up networks - use scope to ensure defer executes before freeing self
+        {
+            self.networks_mutex.lock();
+            defer self.networks_mutex.unlock();
+            var iter = self.networks.valueIterator();
+            while (iter.next()) |net_ptr| {
+                net_ptr.*.deinit();
+                self.allocator.destroy(net_ptr.*);
+            }
+            self.networks.deinit();
         }
-        self.networks.deinit();
 
         if (self.packet_multiplexer) |pm| {
             pm.deinit();
