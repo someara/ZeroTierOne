@@ -1785,9 +1785,11 @@ pub const Node = struct {
                     _ = config_revision;
                     _ = config_timestamp;
 
+                    // Track expected reply
+                    const packet_id = pkt.packetId();
+                    node.expectReplyTo(packet_id);
+
                     // Send via switch
-                    var ctrl_buf: [10]u8 = undefined;
-                    std.debug.print("  [CONFIG_REQ] Sending packet to controller {s}, size={d}\n", .{ controller.toString(&ctrl_buf), pkt.buf.size() });
                     const switch_cbs = node.createSwitchCallbacks();
                     node.switch_engine.send(@ptrCast(node), &pkt, true, nwid, 0, &switch_cbs);
                 }
