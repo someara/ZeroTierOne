@@ -588,7 +588,9 @@ pub const Peer = struct {
         for (&self._paths, 0..) |*pp, i| {
             if (pp.p) |p| {
                 if (include_expired or (now - pp.lr) < peer_path_expiration) {
-                    const q = @divTrunc(p.quality(now), pp.priority);
+                    // Note: priority should always be >= 1, but guard against division by zero
+                    const priority = if (pp.priority > 0) pp.priority else 1;
+                    const q = @divTrunc(p.quality(now), priority);
                     if (q <= best_quality) {
                         best_quality = q;
                         best_path = @intCast(i);

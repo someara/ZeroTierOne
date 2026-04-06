@@ -366,6 +366,9 @@ pub fn Dictionary(comptime C: u32) type {
             var j: usize = 0;
             var esc = false;
 
+            // Guard against zero-length destination buffer
+            if (dest.len == 0) return null;
+
             while (pos < C and buf[pos] != 0 and buf[pos] != '\r' and buf[pos] != '\n') {
                 if (esc) {
                     esc = false;
