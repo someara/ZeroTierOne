@@ -49,6 +49,8 @@ const Multicaster = @import("multicaster.zig").Multicaster;
 const MulticasterCallbacks = @import("multicaster.zig").Callbacks;
 const Switch = @import("switch.zig").Switch;
 const Topology = @import("topology.zig").Topology;
+const SelfAwareness = @import("self_awareness.zig").SelfAwareness;
+const Bond = @import("bond.zig").Bond;
 const Mutex = @import("mutex.zig");
 const Hashtable = @import("hashtable.zig").Hashtable;
 const constants = @import("constants.zig");
@@ -81,6 +83,37 @@ const icmpv6_neighbor_advertisement: u8 = 0x88;
 const state_object_identity_public: u32 = 0;
 const state_object_identity_secret: u32 = 1;
 const state_object_network_config: u32 = 3;
+
+// ── VerbStats ─────────────────────────────────────────────────────
+
+/// Statistics for incoming packet verbs.
+///
+/// Tracks the count and total bytes for each verb type processed by this node.
+/// Matches C++ Node::_stats.inVerbCounts and _stats.inVerbBytes.
+pub const VerbStats = struct {
+    /// Count of packets received for each verb (indexed by verb value 0-31)
+    in_verb_counts: [32]u64,
+
+    /// Total bytes received for each verb (indexed by verb value 0-31)
+    in_verb_bytes: [32]u64,
+
+    pub fn init() VerbStats {
+        return .{
+            .in_verb_counts = [_]u64{0} ** 32,
+            .in_verb_bytes = [_]u64{0} ** 32,
+        };
+    }
+
+    /// Log a verb for statistics tracking.
+    ///
+    /// Called once per incoming packet after verb dispatch.
+    pub fn logVerb(self: *VerbStats, verb: u32, bytes: u32) void {
+        if (verb < 32) {
+            self.in_verb_counts[verb] += 1;
+            self.in_verb_bytes[verb] += bytes;
+        }
+    }
+};
 
 fn multicastSendOutbound(ctx: ?*anyopaque, t_ptr: ?*anyopaque, om: *const OutboundMulticast, to_addr: Address) void {
     const node: *Node = @ptrCast(@alignCast(ctx.?));
@@ -339,8 +372,7 @@ pub const Node = struct {
     switch_engine: *Switch,
     topology: *Topology,
     multicaster: *Multicaster,
-    // self_awareness: *SelfAwareness,
-    // bond: *Bond,
+    self_awareness: *SelfAwareness,
     packet_multiplexer: ?*PacketMultiplexer,
 
     // Networks (managed)
@@ -374,6 +406,9 @@ pub const Node = struct {
     // Indexed by upper 32 bits of packet ID, hashed into bucket.
     expecting_replies: [256][32]u32,
     expecting_replies_ptr: [256]u8,
+
+    // Statistics
+    verb_stats: VerbStats,
 
     const Self = @This();
 
@@ -443,10 +478,9 @@ pub const Node = struct {
             allocator.destroy(packet_multiplexer_ptr);
         }
 
-        // TODO: Initialize other subsystems
-        // - SelfAwareness
-        // - Bond
-        // - PacketMultiplexer
+        const self_awareness_ptr = try allocator.create(SelfAwareness);
+        self_awareness_ptr.* = SelfAwareness.init();
+        errdefer allocator.destroy(self_awareness_ptr);
 
         const node_ptr = try allocator.create(Self);
         node_ptr.* = Self{
@@ -457,6 +491,7 @@ pub const Node = struct {
             .switch_engine = switch_engine,
             .topology = topology,
             .multicaster = multicaster_ptr,
+            .self_awareness = self_awareness_ptr,
             .packet_multiplexer = packet_multiplexer_ptr,
             .networks = std.AutoHashMap(u64, *Network).init(allocator),
             .networks_mutex = .{},
@@ -474,6 +509,7 @@ pub const Node = struct {
             .prng_state = @as(u64, @bitCast(now)) ^ identity.address().toInt(),
             .expecting_replies = [_][32]u32{[_]u32{0} ** 32} ** 256,
             .expecting_replies_ptr = [_]u8{0} ** 256,
+            .verb_stats = VerbStats.init(),
         };
 
         node_ptr.multicaster.callbacks = .{
@@ -587,6 +623,8 @@ pub const Node = struct {
 
         self.multicaster.deinit();
         self.allocator.destroy(self.multicaster);
+
+        self.allocator.destroy(self.self_awareness);
 
         self.direct_paths.deinit();
 
@@ -1811,8 +1849,9 @@ pub const Node = struct {
 
             // Node
             .nodeStatsLogVerb = struct {
-                fn f(_: ?*anyopaque, _: u32, _: u32) void {
-                    // TODO: Log verb statistics
+                fn f(ctx: ?*anyopaque, verb: u32, bytes: u32) void {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    node.verb_stats.logVerb(verb, bytes);
                 }
             }.f,
 

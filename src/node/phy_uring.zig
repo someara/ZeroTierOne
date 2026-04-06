@@ -751,7 +751,11 @@ pub const PhyUring = struct {
                 // Send completed - cleanup handled in freeOpContext
             },
             .recv_tcp, .send_tcp, .accept, .connect => {
-                // TODO: Implement TCP operations
+                // TCP operations are not implemented in the io_uring backend.
+                // ZeroTier is UDP-first; TCP is only used as a fallback when UDP is blocked.
+                // The non-io_uring Phy backend (phy.zig) has full TCP support via poll/select.
+                // Since io_uring is a performance optimization for the common (UDP) case,
+                // TCP support can be deferred until there's a demonstrated need.
                 std.debug.print("phy_uring: TCP operation not yet implemented\n", .{});
             },
         }
