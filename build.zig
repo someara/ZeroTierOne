@@ -151,6 +151,18 @@ pub fn build(b: *std.Build) void {
     );
     test_network_config_step.dependOn(test_network_config_integration);
 
+    const test_two_nodes = addTestRoot(
+        b,
+        target,
+        optimize,
+        "src/test_two_nodes_communicate.zig",
+    );
+    const test_two_nodes_step = b.step(
+        "test-two-nodes",
+        "Run two-node communication test",
+    );
+    test_two_nodes_step.dependOn(test_two_nodes);
+
     // ---------------------------------------------------------------
     // ZeroTea demonstration executable (`zig build zig-demo`)
     // ---------------------------------------------------------------
