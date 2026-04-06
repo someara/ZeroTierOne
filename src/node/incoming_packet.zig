@@ -60,6 +60,7 @@ const version_revision: u16 = 1;
 
 // ── Callbacks ─────────────────────────────────────────────────────
 
+/// **Ownership**: All function pointers are BORROWED. IncomingPacket does not own these callbacks.
 pub const PeerCallbacks = struct {
     peerKey: *const fn (ctx: ?*anyopaque, peer: ?*Peer) *const [32]u8,
     peerAesKeys: *const fn (ctx: ?*anyopaque, peer: ?*Peer) ?*const [2]Aes,
@@ -391,12 +392,14 @@ pub const MulticastCallbacks = struct {
 /// Function-pointer table for all runtime interactions required by
 /// IncomingPacket. The runtime context (`ctx`) is threaded through
 /// every call. Peer, path, and network handles are opaque pointers.
+///
+/// **Ownership**: All pointers and function pointers are BORROWED. Not freed by IncomingPacket.
 pub const Callbacks = struct {
-    ctx: ?*anyopaque,
-    tptr: ?*anyopaque,
+    ctx: ?*anyopaque, // BORROWED: External context
+    tptr: ?*anyopaque, // BORROWED: External topology pointer
 
     /// Local node identity (needed for dearmor, address checks, agree).
-    local_identity: *const Identity,
+    local_identity: *const Identity, // BORROWED: External identity
 
     // ── Time ──────────────────────────────────────────────────────
 
@@ -563,10 +566,14 @@ pub const Callbacks = struct {
 
 /// A received packet awaiting decode. Wraps a `Packet` with metadata
 /// about receive time, path, and authentication state.
+///
+/// **Ownership**:
+/// - pkt: OWNED (Packet owns its buffer)
+/// - path: BORROWED (pointer to external Path, not freed by IncomingPacket)
 pub const IncomingPacket = struct {
-    pkt: Packet,
+    pkt: Packet, // OWNED: Packet contains owned buffer
     receive_time: i64,
-    path: ?*Path,
+    path: ?*Path, // BORROWED: External path pointer
     authenticated: bool,
 
     const Self = @This();
@@ -582,8 +589,10 @@ pub const IncomingPacket = struct {
     }
 
     /// Create an IncomingPacket from raw data.
+    ///
+    /// **Ownership**: `data` is BORROWED - copied into pkt.buf, caller retains ownership.
     pub fn init(
-        data: []const u8,
+        data: []const u8, // BORROWED: Copied into packet buffer
         path: ?*Path,
         now: i64,
     ) !Self {
@@ -596,9 +605,11 @@ pub const IncomingPacket = struct {
     }
 
     /// Re-initialize in place (reuses the existing buffer).
+    ///
+    /// **Ownership**: `data` is BORROWED - copied into packet buffer.
     pub fn reinit(
         self: *Self,
-        data: []const u8,
+        data: []const u8, // BORROWED: Copied into packet buffer
         path: ?*Path,
         now: i64,
     ) !void {

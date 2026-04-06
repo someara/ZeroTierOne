@@ -360,25 +360,34 @@ fn multicastSendToReplicator(
 
 // ── Node ──────────────────────────────────────────────────────────
 
+/// **Ownership**:
+/// - allocator: BORROWED (not freed by Node)
+/// - identity: OWNED (freed in deinit)
+/// - switch_engine, topology, multicaster, self_awareness: OWNED (allocated pointers freed in deinit)
+/// - networks: OWNED (AutoHashMap and Network* freed in deinit)
+/// - direct_paths: OWNED (managed array freed in deinit)
+/// - user_ptr: BORROWED (external pointer)
+/// - network_controller: OWNED (optional pointer freed in deinit)
+/// - callbacks: BORROWED (function pointers not owned)
 pub const Node = struct {
-    allocator: mem.Allocator,
+    allocator: mem.Allocator, // BORROWED: Not freed by Node
 
     // Core identity
-    identity: Identity,
-    public_identity_str: [identity_mod.string_buffer_length]u8,
-    secret_identity_str: [identity_mod.string_buffer_length]u8,
+    identity: Identity, // OWNED: Freed in deinit
+    public_identity_str: [identity_mod.string_buffer_length]u8, // OWNED: Inline array
+    secret_identity_str: [identity_mod.string_buffer_length]u8, // OWNED: Inline array
 
     // Subsystems (owned)
-    switch_engine: *Switch,
-    topology: *Topology,
-    multicaster: *Multicaster,
-    self_awareness: *SelfAwareness,
-    packet_multiplexer: ?*PacketMultiplexer,
+    switch_engine: *Switch, // OWNED: Allocated pointer freed in deinit
+    topology: *Topology, // OWNED: Allocated pointer freed in deinit
+    multicaster: *Multicaster, // OWNED: Allocated pointer freed in deinit
+    self_awareness: *SelfAwareness, // OWNED: Allocated pointer freed in deinit
+    packet_multiplexer: ?*PacketMultiplexer, // OWNED: Optional pointer freed in deinit
 
     // Networks (managed)
-    networks: std.AutoHashMap(u64, *Network),
+    networks: std.AutoHashMap(u64, *Network), // OWNED: HashMap and Network* freed in deinit
     networks_mutex: Mutex,
-    direct_paths: std.array_list.Managed(InetAddress),
+    direct_paths: std.array_list.Managed(InetAddress), // OWNED: Managed array freed in deinit
     direct_paths_mutex: Mutex,
 
     // State
@@ -391,12 +400,12 @@ pub const Node = struct {
     last_housekeeping_run: i64,
 
     // User pointer (opaque to us, passed through to callbacks)
-    user_ptr: ?*anyopaque,
-    network_controller: ?*network_controller_mod.Controller,
+    user_ptr: ?*anyopaque, // BORROWED: External pointer
+    network_controller: ?*network_controller_mod.Controller, // OWNED: Optional pointer freed in deinit
     network_controller_sender: network_controller_mod.Sender,
 
     // Callbacks to host application
-    callbacks: Callbacks,
+    callbacks: Callbacks, // BORROWED: Function pointers not owned
 
     // PRNG state for generating random values
     prng_state: u64,
@@ -404,11 +413,11 @@ pub const Node = struct {
     // Expected reply tracking (mirrors C++ _expectingRepliesTo)
     // 256 buckets × 32 entries = 8192 tracked packet IDs.
     // Indexed by upper 32 bits of packet ID, hashed into bucket.
-    expecting_replies: [256][32]u32,
-    expecting_replies_ptr: [256]u8,
+    expecting_replies: [256][32]u32, // OWNED: Inline array
+    expecting_replies_ptr: [256]u8, // OWNED: Inline array
 
     // Statistics
-    verb_stats: VerbStats,
+    verb_stats: VerbStats, // OWNED: Value type
 
     const Self = @This();
 
