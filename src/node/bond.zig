@@ -324,11 +324,12 @@ pub const Bond = struct {
     }
 
     /// Nominate a path for use.
+    /// Returns true if successful, false if out of memory.
     pub fn nominatePath(
         self: *Self,
         path: *anyopaque,
         now: i64,
-    ) void {
+    ) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -337,20 +338,21 @@ pub const Bond = struct {
             if (p.path == path) {
                 p.last_activity = now;
                 p.alive = true;
-                return;
+                return true;
             }
         }
 
         // Add new path
         const mode: LinkMode = if (self.paths.items.len == 0) .primary else .spare;
         const bonded_path = BondedPath.init(path, mode);
-        self.paths.append(self.allocator, bonded_path) catch return;
+        self.paths.append(self.allocator, bonded_path) catch return false;
 
         // Set as primary if first
         if (self.paths.items.len == 1) {
             self.primary_path_index = 0;
             self.active_path_index = 0;
         }
+        return true;
     }
 
     /// Remove a path from consideration.
@@ -664,8 +666,8 @@ test "Bond: path nomination and removal" {
     var path2: usize = 2;
     const now: i64 = 1000;
 
-    bond.nominatePath(@ptrCast(&path1), now);
-    bond.nominatePath(@ptrCast(&path2), now);
+    try testing.expect(bond.nominatePath(@ptrCast(&path1), now));
+    try testing.expect(bond.nominatePath(@ptrCast(&path2), now));
 
     try testing.expectEqual(@as(usize, 2), bond.paths.items.len);
     try testing.expectEqual(@as(?usize, 0), bond.primary_path_index);
@@ -686,8 +688,8 @@ test "Bond: path selection - active backup" {
     var path2: usize = 2;
     const now: i64 = 1000;
 
-    bond.nominatePath(@ptrCast(&path1), now);
-    bond.nominatePath(@ptrCast(&path2), now);
+    try testing.expect(bond.nominatePath(@ptrCast(&path1), now));
+    try testing.expect(bond.nominatePath(@ptrCast(&path2), now));
 
     // Should select first path
     const selected = bond.selectPath(0, now);
@@ -706,9 +708,9 @@ test "Bond: path selection - round robin" {
     var path3: usize = 3;
     const now: i64 = 1000;
 
-    bond.nominatePath(@ptrCast(&path1), now);
-    bond.nominatePath(@ptrCast(&path2), now);
-    bond.nominatePath(@ptrCast(&path3), now);
+    try testing.expect(bond.nominatePath(@ptrCast(&path1), now));
+    try testing.expect(bond.nominatePath(@ptrCast(&path2), now));
+    try testing.expect(bond.nominatePath(@ptrCast(&path3), now));
 
     // Should cycle through paths
     const sel1 = bond.selectPath(0, now);
@@ -733,8 +735,8 @@ test "Bond: path selection - XOR" {
     var path2: usize = 2;
     const now: i64 = 1000;
 
-    bond.nominatePath(@ptrCast(&path1), now);
-    bond.nominatePath(@ptrCast(&path2), now);
+    try testing.expect(bond.nominatePath(@ptrCast(&path1), now));
+    try testing.expect(bond.nominatePath(@ptrCast(&path2), now));
 
     // Same flow should get same path
     const sel1 = bond.selectPath(42, now);
@@ -753,7 +755,7 @@ test "Bond: statistics tracking" {
     var path1: usize = 1;
     const now: i64 = 1000;
 
-    bond.nominatePath(@ptrCast(&path1), now);
+    try testing.expect(bond.nominatePath(@ptrCast(&path1), now));
 
     // Record outgoing packet
     bond.recordOutgoingPacket(@ptrCast(&path1), 1, 100, now);
@@ -776,9 +778,9 @@ test "Bond: link counting" {
     var path3: usize = 3;
     const now: i64 = 1000;
 
-    bond.nominatePath(@ptrCast(&path1), now);
-    bond.nominatePath(@ptrCast(&path2), now);
-    bond.nominatePath(@ptrCast(&path3), now);
+    try testing.expect(bond.nominatePath(@ptrCast(&path1), now));
+    try testing.expect(bond.nominatePath(@ptrCast(&path2), now));
+    try testing.expect(bond.nominatePath(@ptrCast(&path3), now));
 
     try testing.expectEqual(@as(u32, 3), bond.getNumTotalLinks());
     try testing.expectEqual(@as(u32, 3), bond.getNumAliveLinks());
@@ -798,7 +800,7 @@ test "Bond: background tasks - health monitoring" {
     var path1: usize = 1;
     const now: i64 = 1000;
 
-    bond.nominatePath(@ptrCast(&path1), now);
+    try testing.expect(bond.nominatePath(@ptrCast(&path1), now));
     try testing.expect(bond.paths.items[0].alive);
 
     // Run background task after timeout

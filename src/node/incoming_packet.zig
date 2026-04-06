@@ -1052,6 +1052,8 @@ pub const IncomingPacket = struct {
             cb.local_identity.address(),
             .@"error",
         );
+        // Note: STYLE.md 2.2 - OOM silently ignored here (already on failure path).
+        // If error response packet construction fails, we simply don't send it.
         outp.buf.appendByte(@intFromEnum(self.pkt.verb()), 1) catch return;
         outp.buf.appendInt(u64, self.pkt.packetId()) catch return;
         outp.buf.appendByte(@intFromEnum(ErrorCode.need_membership_certificate), 1) catch return;
@@ -1086,6 +1088,8 @@ pub const IncomingPacket = struct {
         const peer_addr = Address.init(cb.peer.peerAddress(cb.ctx, p));
 
         var outp = Packet.initNew(peer_addr, cb.local_identity.address(), .@"error");
+        // Note: STYLE.md 2.2 - OOM silently ignored here (already on failure path).
+        // If error response packet construction fails, we simply don't send it.
         outp.buf.appendByte(@intFromEnum(Verb.network_config_request), 1) catch return;
         outp.buf.appendInt(u64, request_packet_id) catch return;
         outp.buf.appendByte(@intFromEnum(ErrorCode.unsupported_operation), 1) catch return;
