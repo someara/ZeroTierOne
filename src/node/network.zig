@@ -125,13 +125,15 @@ pub const MulticastGroupKey = struct {
 ///
 /// Three of these are kept per-network to allow concurrent config updates.
 /// Each contains a full Dictionary buffer, making this a very large struct.
+///
+/// **Ownership**: All fields are OWNED (inline value type).
 pub const IncomingConfigChunk = struct {
     ts: u64,
     update_id: u64,
-    have_chunk_ids: [max_update_chunks]u64,
+    have_chunk_ids: [max_update_chunks]u64, // OWNED: Fixed-size inline array
     have_chunks: u32,
     have_bytes: u32,
-    data: Dictionary(network_config.dict_capacity),
+    data: Dictionary(network_config.dict_capacity), // OWNED: Inline dictionary buffer
 
     pub fn init() IncomingConfigChunk {
         return .{
@@ -152,8 +154,11 @@ pub const IncomingConfigChunk = struct {
 /// pointers are optional — null means the operation is unavailable.
 ///
 /// New fields are added as later chunks implement more methods.
+///
+/// **Ownership**: All function pointers and the context pointer are BORROWED.
+/// Network does not own these callbacks and must not free them.
 pub const Callbacks = struct {
-    ctx: ?*anyopaque = null,
+    ctx: ?*anyopaque = null, // BORROWED: External context, not owned by Network
 
     /// Notify host of virtual network port changes (UP/DOWN/CONFIG_UPDATE).
     /// Returns an error code (0 = ok). Matches the ZeroTier C API callback.
@@ -321,6 +326,12 @@ pub const Callbacks = struct {
 /// A joined virtual network.
 ///
 /// Fields prefixed with `_` are internal state protected by `_lock`.
+///
+/// **Ownership Notes**:
+/// - All fixed-size arrays and value types are OWNED (inline in struct)
+/// - Hashtables are OWNED (Network owns the container and scalar values)
+/// - Membership objects in _memberships hashtable are OWNED (freed in deinit)
+/// - Callbacks and allocator are BORROWED (not freed by Network)
 pub const Network = struct {
     // ── Immutable (set at init, never changed) ───────────
 
@@ -335,12 +346,12 @@ pub const Network = struct {
 
     // ── User pointer for external API ────────────────────
 
-    _u_ptr: ?*anyopaque,
+    _u_ptr: ?*anyopaque, // BORROWED: External user pointer
 
     // ── Configuration ────────────────────────────────────
 
     /// Current network configuration. Zero-init means "no config yet".
-    _config: NetworkConfig,
+    _config: NetworkConfig, // OWNED: Value type with inline fixed arrays
 
     /// Timestamp of last config update (ms), or 0 if never configured.
     _last_config_update: i64,
@@ -358,7 +369,7 @@ pub const Network = struct {
     _netconf_failure: NetconfFailure,
 
     /// SSO authentication URL (null-terminated in first bytes).
-    _authentication_url: [2048]u8,
+    _authentication_url: [2048]u8, // OWNED: Fixed-size inline array
 
     // ── Multicast state ──────────────────────────────────
 
@@ -366,28 +377,28 @@ pub const Network = struct {
     _last_announced_multicast_groups_upstream: i64,
 
     /// Locally-subscribed multicast groups (sorted, from tap device).
-    _my_multicast_groups: [max_multicast_subscriptions]MulticastGroup,
+    _my_multicast_groups: [max_multicast_subscriptions]MulticastGroup, // OWNED: Inline array
 
     /// Number of entries in `_my_multicast_groups`.
     _my_multicast_group_count: u32,
 
     /// Multicast groups learned from bridged traffic (key -> last-seen timestamp).
-    _multicast_groups_behind_me: Hashtable(MulticastGroupKey, i64),
+    _multicast_groups_behind_me: Hashtable(MulticastGroupKey, i64), // OWNED: Hashtable with scalar values
 
     // ── Bridge routes ────────────────────────────────────
 
     /// MAC-to-bridge-address mapping for remote bridge routes.
-    _remote_bridge_routes: Hashtable(MAC, Address),
+    _remote_bridge_routes: Hashtable(MAC, Address), // OWNED: Hashtable with scalar values
 
     // ── Membership state ─────────────────────────────────
 
     /// Per-peer membership/credential state, keyed by peer address.
-    _memberships: Hashtable(Address, Membership),
+    _memberships: Hashtable(Address, Membership), // OWNED: Hashtable, Membership values freed in deinit
 
     // ── Config chunk reassembly ──────────────────────────
 
     /// Incoming config chunks being reassembled (3 concurrent slots).
-    _incoming_config_chunks: [max_incoming_updates]IncomingConfigChunk,
+    _incoming_config_chunks: [max_incoming_updates]IncomingConfigChunk, // OWNED: Inline array of value types
 
     // ── Packet filter counters ───────────────────────────
 
@@ -398,7 +409,7 @@ pub const Network = struct {
 
     // ── Callbacks ────────────────────────────────────────
 
-    _callbacks: Callbacks,
+    _callbacks: Callbacks, // BORROWED: Function pointers not owned by Network
 
     // ── Thread safety ────────────────────────────────────
 
@@ -406,7 +417,7 @@ pub const Network = struct {
 
     // ── Allocator ────────────────────────────────────────
 
-    _allocator: std.mem.Allocator,
+    _allocator: std.mem.Allocator, // BORROWED: Allocator not owned by Network
 
     // ── Constants ────────────────────────────────────────
 
