@@ -23,6 +23,7 @@ const TunDevice = @import("node/tun_device.zig").TunDevice;
 const HttpApi = @import("node/http_api.zig").HttpApi;
 const World = @import("node/world.zig").World;
 const Buffer = @import("node/buffer.zig").Buffer;
+const Peer = @import("node/peer.zig").Peer;
 
 /// Service context - holds all state for the running service
 pub const Service = struct {
@@ -243,6 +244,8 @@ pub const Service = struct {
                 };
                 if (self.node.topology.addWorld(&world, true)) {
                     std.debug.print("  ✓ Planet loaded from {s} (world ID {d})\n", .{ path, world.id() });
+                    // Add root servers as peers so we can decrypt their responses
+                    self.addRootPeers(&world);
                 } else {
                     std.debug.print("  ✗ Planet rejected by topology\n", .{});
                     self.loadEmbeddedPlanet();
@@ -317,8 +320,47 @@ pub const Service = struct {
         };
         if (self.node.topology.addWorld(&world, true)) {
             std.debug.print("  ✓ Planet loaded (embedded, world ID {d})\n", .{world.id()});
+            // Add root servers as peers so we can decrypt their responses
+            self.addRootPeers(&world);
         } else {
             std.debug.print("  ✗ Embedded planet rejected\n", .{});
+        }
+    }
+
+    /// Add root servers from a world as peers to topology.
+    ///
+    /// This ensures we can decrypt OK(HELLO) responses from root servers,
+    /// which are sent encrypted even though our HELLO to them is unencrypted.
+    fn addRootPeers(self: *Service, world: *const World) void {
+        const roots = world.roots();
+        for (roots) |root| {
+            const root_addr = root.identity.address();
+
+            // Create a Peer object from the root's identity
+            var peer = Peer.create(&self.node.identity, &root.identity) orelse {
+                std.debug.print("  ⚠ Failed to create peer for root server {x:0>10}\n", .{root_addr.toInt()});
+                continue;
+            };
+
+            // Set up peer callbacks (matching node.zig:1870-1879)
+            peer.setCallbacks(
+                @ptrCast(self.node),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+            );
+
+            // Add peer to topology
+            const added_peer = self.node.topology.addPeer(&peer);
+            if (added_peer) |_| {
+                std.debug.print("  ✓ Added root server {x:0>10} to topology\n", .{root_addr.toInt()});
+            } else {
+                std.debug.print("  ⚠ Failed to add root server {x:0>10} to topology\n", .{root_addr.toInt()});
+            }
         }
     }
 
