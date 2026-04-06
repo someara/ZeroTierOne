@@ -321,44 +321,48 @@ pub const Controller = struct {
         std.debug.print("  → Sending NETWORK_CONFIG\n", .{});
 
         var config_resp = Packet.initNew(to_address, self.address, .network_config);
-
         const now = std.time.milliTimestamp();
 
-        // Network config payload
-        try config_resp.buf.appendInt(u64, network_config.network_id);
-        try config_resp.buf.appendInt(i64, now);
-        try config_resp.buf.appendInt(u64, network_config.revision);
-        try config_resp.buf.appendInt(u64, to_address._a); // issued to
-        try config_resp.buf.appendByte(0, 1); // flags
-        try config_resp.buf.appendInt(u16, network_config.mtu);
-        try config_resp.buf.appendInt(u32, network_config.multicast_limit);
+        // Build NetworkConfig struct for serialization
+        const nc_mod = @import("node/network_config.zig");
+        const constants = @import("node/constants.zig");
+        var nc = nc_mod.NetworkConfig.init();
+        nc.network_id = network_config.network_id;
+        nc.timestamp = now;
+        nc.revision = network_config.revision;
+        nc.issued_to = to_address;
+        nc.mtu = network_config.mtu;
+        nc.multicast_limit = network_config.multicast_limit;
+        nc.flags = 0; // Basic config
+        nc.net_type = @intCast(constants.c_api.ZT_NETWORK_TYPE_PRIVATE);
 
-        // Name (empty for now)
-        try config_resp.buf.appendByte(0, 1);
-
-        // Get member's IP assignments
+        // Add IP assignments
         const member = network_config.members.get(to_address._a);
         if (member) |m| {
-            // Fixed: STYLE.md 7.2 - guard cast, cap at u16 max
-            const ip_count = std.math.cast(u16, m.ip_assignments.items.len) orelse 65535;
-            try config_resp.buf.appendInt(u16, ip_count);
-            for (m.ip_assignments.items) |ip| {
-                try config_resp.buf.appendByte(4, 1); // IPv4
-                try config_resp.buf.appendByte(8, 1); // metric
-                try config_resp.buf.appendBytes(&ip);
-                try config_resp.buf.appendByte(24, 1); // netmask bits
+            const InetAddress = @import("node/inet_address.zig").InetAddress;
+            for (m.ip_assignments.items, 0..) |ip, i| {
+                if (i >= nc_mod.max_zt_assigned_addresses) break;
+                // InetAddress stores netmask bits in port field
+                nc.static_ips[i] = InetAddress.initV4(ip, 24); // /24 netmask
+                nc.static_ip_count += 1;
             }
-        } else {
-            try config_resp.buf.appendInt(u16, 0); // no IPs
         }
 
-        // Routes, static IPs, rules, capabilities, tags, certificates (all empty)
-        try config_resp.buf.appendInt(u16, 0); // routes
-        try config_resp.buf.appendInt(u16, 0); // static IPs
-        try config_resp.buf.appendInt(u16, 0); // rules
-        try config_resp.buf.appendInt(u16, 0); // capabilities
-        try config_resp.buf.appendInt(u16, 0); // tags
-        try config_resp.buf.appendInt(u16, 0); // certificates
+        // Serialize to Dictionary
+        const Dictionary = @import("node/dictionary.zig").Dictionary;
+        var dict = Dictionary(nc_mod.dict_capacity).init();
+        try nc.toDictionary(&dict);
+
+        // Append network ID + chunk length + Dictionary payload
+        try config_resp.buf.appendInt(u64, network_config.network_id);
+
+        const dict_size = dict.sizeBytes();
+        const chunk_len: u16 = @intCast(dict_size);
+        try config_resp.buf.appendInt(u16, chunk_len); // Big-endian chunk length
+
+        const dict_bytes = dict.data();
+        const dict_slice = dict_bytes[0..dict_size];
+        try config_resp.buf.appendBytes(dict_slice);
 
         // Armor
         if (key_available) {
@@ -369,7 +373,6 @@ pub const Controller = struct {
         }
 
         const config_data = config_resp.buf.data();
-        // Fixed BUG #18: Catch sendto errors
         const sent = std.posix.sendto(
             self.socket,
             config_data,

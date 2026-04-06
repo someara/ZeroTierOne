@@ -367,31 +367,92 @@ test "node receives network config from controller" {
     const resp_verb = resp_pkt.verb();
     std.debug.print("  ✓ Response verb: {}\n", .{resp_verb});
 
-    // TODO: Process the NETWORK_CONFIG via node's incoming packet handler
-    // For now, just verify we got a response
+    // Process the NETWORK_CONFIG response
+    std.debug.print("  → Processing config via handleConfigChunk...\n", .{});
 
-    std.debug.print("  ✓ Config response received!\n\n", .{});
+    const payload_offset = pkt_mod.idx_payload; // Skip packet header
+    const payload = resp_pkt.buf.data()[payload_offset..];
 
-    // Step 8: Verify complete packet exchange
-    std.debug.print("Step 8: Verifying complete flow...\n", .{});
+    const config_update_id = network.handleConfigChunk(
+        null, // tptr
+        resp_pkt.packetId(),
+        controller.address,
+        payload,
+        0, // start at beginning of payload
+    );
 
-    // Verify network object exists and has correct ID
-    try testing.expect(network.id() == test_network_id);
+    if (config_update_id == 0) {
+        std.debug.print("  ❌ Failed to process config\n", .{});
+        return error.ConfigProcessFailed;
+    }
+    std.debug.print("  ✓ Config processed (update ID: {})\n", .{config_update_id});
+
+    std.debug.print("  ✓ Config response received and applied!\n\n", .{});
+
+    // Step 8: Verify applied configuration
+    std.debug.print("Step 8: Verifying applied configuration...\n", .{});
+
+    // Get the applied config
+    const applied_config = network.config();
+
+    std.debug.print("  → Network ID: 0x{x}\n", .{applied_config.network_id});
+    std.debug.print("  → Revision: {}\n", .{applied_config.revision});
+    std.debug.print("  → MTU: {}\n", .{applied_config.mtu});
+    std.debug.print("  → Static IP count: {}\n", .{applied_config.static_ip_count});
+
+    // Verify network ID matches
+    try testing.expect(applied_config.network_id == test_network_id);
     std.debug.print("  ✓ Network ID matches: 0x{x}\n", .{test_network_id});
+
+    // Verify IP assignment
+    try testing.expect(applied_config.static_ip_count > 0);
+    const assigned_ip = applied_config.static_ips[0];
+
+    // Check if it's the expected 10.147.x.x/24
+    if (!assigned_ip.isV4()) {
+        std.debug.print("  ❌ Expected IPv4, got IPv6\n", .{});
+        return error.UnexpectedAddressFamily;
+    }
+
+    // Access sockaddr_in from storage
+    const sin_ptr: *const std.c.sockaddr.in = @ptrCast(@alignCast(&assigned_ip.storage));
+    const addr_ptr: *const [4]u8 = @ptrCast(&sin_ptr.addr);
+    const netmask = assigned_ip.netmaskBits();
+
+    std.debug.print("  → Assigned IP: {}.{}.{}.{}/{}\n", .{
+        addr_ptr[0],
+        addr_ptr[1],
+        addr_ptr[2],
+        addr_ptr[3],
+        netmask,
+    });
+
+    try testing.expect(addr_ptr[0] == 10);
+    try testing.expect(addr_ptr[1] == 147);
+    try testing.expect(netmask == 24);
+
+    std.debug.print("  ✓ IP assignment verified!\n", .{});
 
     // Verify complete packet exchange
     try testing.expect(test_ctx.packets_sent > 0);
     std.debug.print("  ✓ Node sent {} packet(s)\n", .{test_ctx.packets_sent});
     std.debug.print("  ✓ Controller received and processed\n", .{});
     std.debug.print("  ✓ Controller sent response\n", .{});
-    std.debug.print("  ✓ Node received response\n", .{});
+    std.debug.print("  ✓ Node received and applied config\n", .{});
 
     std.debug.print("\n" ++ "═" ** 70 ++ "\n", .{});
-    std.debug.print("Test PASSED: Full packet exchange works!\n", .{});
+    std.debug.print("Test PASSED: Full config flow works!\n", .{});
     std.debug.print("✓ NETWORK_CONFIG_REQUEST sent and received\n", .{});
-    std.debug.print("✓ Member authorized and IP assigned\n", .{});
+    std.debug.print("✓ Member authorized and IP assigned by controller\n", .{});
     std.debug.print("✓ NETWORK_CONFIG response sent and received\n", .{});
-    std.debug.print("Next: Process config and apply IP address\n", .{});
+    std.debug.print("✓ Config parsed via Dictionary format\n", .{});
+    std.debug.print("✓ IP address applied and verified: {}.{}.{}.{}/{}\n", .{
+        addr_ptr[0],
+        addr_ptr[1],
+        addr_ptr[2],
+        addr_ptr[3],
+        netmask,
+    });
     std.debug.print("═" ** 70 ++ "\n\n", .{});
     return;
 
