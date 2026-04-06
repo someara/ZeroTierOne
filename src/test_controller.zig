@@ -33,7 +33,7 @@ const NetworkConfig = struct {
     };
 };
 
-const Controller = struct {
+pub const Controller = struct {
     identity: Identity,
     address: Address,
     socket: std.posix.socket_t,

@@ -137,6 +137,21 @@ pub fn build(b: *std.Build) void {
     ));
 
     // ---------------------------------------------------------------
+    // Integration tests
+    // ---------------------------------------------------------------
+    const test_network_config_integration = addTestRoot(
+        b,
+        target,
+        optimize,
+        "src/test_network_config_integration.zig",
+    );
+    const test_network_config_step = b.step(
+        "test-network-config",
+        "Run network config integration tests (node + controller)",
+    );
+    test_network_config_step.dependOn(test_network_config_integration);
+
+    // ---------------------------------------------------------------
     // ZeroTea demonstration executable (`zig build zig-demo`)
     // ---------------------------------------------------------------
     // Demonstrates the converted Zig modules working together on Mac/Linux.
