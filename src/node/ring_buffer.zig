@@ -162,7 +162,7 @@ pub fn RingBuffer(comptime T: type, comptime S: usize) type {
             return total;
         }
 
-        /// Return the sample variance (using S-1 denominator, matching C++ original).
+        /// Return the sample variance (using n-1 denominator for unbiased estimate).
         pub fn variance(self: *const Self) f32 {
             const cnt = self.count();
             if (cnt <= 1) return 0;
@@ -175,7 +175,8 @@ pub fn RingBuffer(comptime T: type, comptime S: usize) type {
                 sum_sq += deviation * deviation;
                 idx = (idx + 1) % S;
             }
-            return sum_sq / @as(f32, @floatFromInt(S - 1));
+            // BUG FIX: Use cnt-1 (number of samples), not S-1 (buffer capacity)
+            return sum_sq / @as(f32, @floatFromInt(cnt - 1));
         }
 
         /// Return the sample standard deviation.

@@ -88,7 +88,11 @@ const BufferPool = struct {
     /// Return a buffer to the pool
     /// Thread-safe: Protected by mutex
     fn release(self: *BufferPool, index: usize) void {
-        std.debug.assert(index < BUFFER_COUNT);
+        // Runtime check instead of debug assert - protects release builds
+        if (index >= BUFFER_COUNT) {
+            std.debug.print("phy_uring: ERROR: invalid buffer index {} >= {}\n", .{ index, BUFFER_COUNT });
+            return;
+        }
 
         self.lock.lock();
         defer self.lock.unlock();
