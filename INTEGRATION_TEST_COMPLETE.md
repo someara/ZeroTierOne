@@ -10,7 +10,7 @@ The integration test proves:
 - Controller assigns IP address and sends response
 - Node receives and validates the response
 
-**This is not "should work" or "looks ready" - this is actual proof with real packets.**
+**This is not "should work" or "looks ready" - this is actual proof with real packets, Dictionary parsing, and IP assignment.**
 
 ## Test Results
 
@@ -121,13 +121,34 @@ Node                                Controller
 [verb: network_config]                  |
 ```
 
-## What's Remaining
+## What's Proven ✅ (NEW - Commit d5b88934)
 
-### Parsing & Application (Small Task)
-- Parse NETWORK_CONFIG payload
-- Extract IP assignment (10.147.0.0)
-- Apply to node's network object
-- Verify IP via node.getNetwork().config()
+### Config Parsing & Application
+- ✅ Controller sends Dictionary-formatted NETWORK_CONFIG (593 bytes)
+- ✅ Node calls `network.handleConfigChunk()` to parse response
+- ✅ Dictionary deserialized via `NetworkConfig.fromDictionary()`
+- ✅ Config applied via `network.setConfiguration()` (returns 2 = success)
+- ✅ IP assignment stored in `network.config().static_ips[0]`
+- ✅ IP verified as 10.147.0.0/24
+
+### Test Output
+```
+Step 7: Node receiving config response...
+  ✓ Received 593 bytes from controller
+  ✓ Response verb: .network_config
+  → Processing config via handleConfigChunk...
+  ✓ Config processed (update ID: 13965648859827713792)
+
+Step 8: Verifying applied configuration...
+  → Network ID: 0x2fb2bd36a0000001
+  → Revision: 1
+  → MTU: 2800
+  → Static IP count: 1
+  → Assigned IP: 10.147.0.0/24
+  ✓ IP assignment verified!
+```
+
+## What's Remaining
 
 ### Production Testing (Larger Task)
 - Test with real ZeroTier controller
@@ -161,11 +182,20 @@ zig build test-fast --summary all
 2. `7afebe9e` - docs: integration test status and unblocking options
 3. `5c5e1a3f` - feat: complete packet exchange - node to controller works!
 4. `04ad04eb` - feat: COMPLETE end-to-end packet exchange! 🎉
+5. `d5b88934` - feat: parse and apply network config with Dictionary format
 
 ## Conclusion
 
-**All blockers resolved.** Full packet exchange proven with actual UDP transmission, encryption, and processing.
+**All blockers resolved.** Full network config flow proven end-to-end:
+- ✅ UDP packet transmission (bidirectional)
+- ✅ Encryption/decryption (Salsa20 + Poly1305)
+- ✅ Controller authorization and IP assignment
+- ✅ Dictionary serialization/deserialization
+- ✅ Config parsing and application
+- ✅ IP address stored and verifiable
 
-The network configuration flow is **verified and working**. Next step is parsing the response payload and applying the IP configuration.
+The network configuration flow is **verified and working**. A node can join a network, request config, receive Dictionary-formatted response, parse it, apply it, and access the assigned IP.
 
-ZeroTea now has **proof** of end-to-end functionality. 🚀
+ZeroTea now has **proof** of end-to-end network config functionality. 🚀
+
+Next: Test with multiple nodes, real controllers, and TUN device integration.
