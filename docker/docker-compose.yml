@@ -51,7 +51,7 @@ services:
       - controller
     stdin_open: true
     tty: true
-    command: ["/zerotier/zig-out/bin/zerotier-one", "-p", "9993"]
+    command: ["/zerotier/zig-out/bin/zerotea", "-p", "9993"]
 
   # Client 2
   client2:
@@ -72,7 +72,7 @@ services:
       - controller
     stdin_open: true
     tty: true
-    command: ["/zerotier/zig-out/bin/zerotier-one", "-p", "9993"]
+    command: ["/zerotier/zig-out/bin/zerotea", "-p", "9993"]
 
 networks:
   zerotier-net:

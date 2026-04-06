@@ -6,7 +6,6 @@
 /// - Authorize members
 ///
 /// This allows testing the full network join flow in Docker/QEMU
-
 const std = @import("std");
 const net = std.net;
 
@@ -279,13 +278,13 @@ const Controller = struct {
 
             // New member - assign IP
             // Fixed: STYLE.md - proper ArrayList initialization
-            var ip_list = std.ArrayList([4]u8).init(self.allocator);
+            var ip_list = std.ArrayList([4]u8){ .items = &.{}, .capacity = 0 };
             errdefer ip_list.deinit(self.allocator);
 
             // Fixed BUG #7: member_count already includes new member, subtract 1
             const member_count = network_config.members.count() - 1;
             // Fixed: STYLE.md 7.2 - guard integer casts to prevent panic
-            // Fixed: STYLE.md 4.3 - no silent truncation, % 256 redundant with u8 cast
+            // Fixed: STYLE.md 4.2 - no silent truncation, % 256 redundant with u8 cast
             // Cap member count at 65535 (max for 10.147.x.x address space)
             const capped_count = @min(member_count, 65535);
             const high_byte: u8 = @intCast(capped_count / 256); // auto-wraps to 0-255
@@ -389,7 +388,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const port: u16 = 9993;  // Fixed: match Docker expectation
+    const port: u16 = 9993; // Fixed: match Docker expectation
 
     var controller = try Controller.init(allocator, port);
     defer controller.deinit();

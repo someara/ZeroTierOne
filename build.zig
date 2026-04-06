@@ -1,5 +1,62 @@
 const std = @import("std");
 
+fn addTestModulesStep(
+    b: *std.Build,
+    step: *std.Build.Step,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    modules: []const []const u8,
+) void {
+    for (modules) |test_file| {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path(test_file),
+            .target = target,
+            .optimize = optimize,
+        });
+
+        // All test modules get the project root include path so that
+        // transitive @cImport of "include/ZeroTierOne.h" resolves correctly.
+        test_mod.addIncludePath(b.path("."));
+
+        const t = b.addTest(.{
+            .root_module = test_mod,
+        });
+        const run_t = b.addRunArtifact(t);
+        step.dependOn(&run_t.step);
+    }
+}
+
+fn addTestRoot(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    root_source_file: []const u8,
+) *std.Build.Step {
+    return addFilteredTestRoot(b, target, optimize, root_source_file, &.{});
+}
+
+fn addFilteredTestRoot(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    root_source_file: []const u8,
+    filters: []const []const u8,
+) *std.Build.Step {
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path(root_source_file),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_mod.addIncludePath(b.path("."));
+
+    const t = b.addTest(.{
+        .root_module = test_mod,
+        .filters = filters,
+    });
+    const run_t = b.addRunArtifact(t);
+    return &run_t.step;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -15,74 +72,26 @@ pub fn build(b: *std.Build) void {
     //   - make selftest     # Build C++ crypto benchmarks
     //
     // Zig builds (this file):
-    //   - zig build test        # Run 673 Zig module tests
+    //   - zig build test        # Run all Zig tests
+    //   - zig build test-core   # Run core Zig module/regression tests
+    //   - zig build test-fast   # Run the fastest core unit-style tests
+    //   - zig build test-slow-core # Run slower graph/network-heavy core tests
+    //   - zig build test-peer   # Run peer-heavy core tests
+    //   - zig build test-topology # Run topology-heavy core tests
     //   - zig build selftest    # Run Zig crypto benchmarks
     //   - zig build zig-demo    # Run Zig demonstration
     // ---------------------------------------------------------------
 
     // ---------------------------------------------------------------
-    // Zig module tests  (`zig build test`)
+    // Zig tests  (`zig build test`, `zig build test-core`,
+    //             `zig build test-fast`, `zig build test-slow-core`,
+    //             `zig build test-peer`, `zig build test-topology`)
     // ---------------------------------------------------------------
-    // Each converted Zig module has inline tests. We create a test step
-    // for each module and wire them all into `zig build test`.
+    // Each converted Zig module has inline tests. `zig build test-core`
+    // excludes the longer-running integration/fuzz targets, while
+    // `zig build test` preserves the full existing coverage.
 
-    const zig_test_modules = [_][]const u8{
-        "src/node/atomic_counter.zig",
-        "src/node/credential.zig",
-        "src/node/mutex.zig",
-        "src/node/shared_ptr.zig",
-        "src/node/ring_buffer.zig",
-        "src/node/buffer.zig",
-        "src/node/hashtable.zig",
-        "src/node/metrics.zig",
-        "src/node/constants.zig",
-        "src/node/utils.zig",
-        "src/node/sha512.zig",
-        "src/node/poly1305.zig",
-        "src/node/salsa20.zig",
-        "src/node/ecc.zig",
-        "src/node/aes.zig",
-        // Phase 3a: Network address types
-        "src/node/address.zig",
-        "src/node/mac.zig",
-        "src/node/inet_address.zig",
-        "src/node/multicast_group.zig",
-        "src/node/dns.zig",
-        "src/node/dictionary.zig",
-        // Phase 3b: Identity + Packet
-        "src/node/identity.zig",
-        "src/node/lz4.zig",
-        "src/node/packet.zig",
-        // Phase 3c: Credentials
-        "src/node/tag.zig",
-        "src/node/revocation.zig",
-        "src/node/certificate_of_membership.zig",
-        "src/node/certificate_of_ownership.zig",
-        "src/node/capability.zig",
-        // Phase 3d: Configuration
-        "src/node/world.zig",
-        "src/node/runtime_environment.zig",
-        "src/node/network_config.zig",
-        "src/node/network_controller.zig",
-        // Phase 4: Peer Management
-        "src/node/path.zig",
-        "src/node/trace.zig",
-        "src/node/self_awareness.zig",
-        "src/node/peer.zig",
-        "src/node/topology.zig",
-        // Phase 5: Network & Multicast
-        "src/node/membership.zig",
-        "src/node/outbound_multicast.zig",
-        "src/node/multicaster.zig",
-        "src/node/network.zig",
-        // Phase 6: Packet Processing & Node
-        "src/node/packet_multiplexer.zig",
-        "src/node/incoming_packet.zig",
-        // Regression tests
-        "src/test_salsa20_keystream_regression.zig",
-        "src/test_expected_reply_regression.zig",
-        "src/test_fragment_reassembly_regression.zig",
-        "src/test_bug_hunting_regression.zig",
+    const long_running_test_modules = [_][]const u8{
         // Integration tests
         "src/test_integration_mock_server.zig",
         "src/test_critical_paths_integration.zig",
@@ -94,29 +103,41 @@ pub fn build(b: *std.Build) void {
         "src/test_phy_uring_fuzz_extended.zig",
     };
 
-    const test_step = b.step("test", "Run Zig module tests");
+    const test_step = b.step("test", "Run all Zig tests");
+    const core_test_root = addTestRoot(b, target, optimize, "src/test_core.zig");
+    test_step.dependOn(core_test_root);
+    addTestModulesStep(b, test_step, target, optimize, long_running_test_modules[0..]);
 
-    for (zig_test_modules) |test_file| {
-        const test_mod = b.createModule(.{
-            .root_source_file = b.path(test_file),
-            .target = target,
-            .optimize = optimize,
-        });
+    const test_core_step = b.step("test-core", "Run core Zig module and regression tests");
+    test_core_step.dependOn(core_test_root);
 
-        // All test modules get the project root include path so that
-        // transitive @cImport of "include/ZeroTierOne.h" (via
-        // constants.zig) resolves correctly.
-        test_mod.addIncludePath(b.path("."));
+    const test_fast_step = b.step("test-fast", "Run faster core unit-style tests");
+    test_fast_step.dependOn(addTestRoot(b, target, optimize, "src/test_fast.zig"));
 
-        const t = b.addTest(.{
-            .root_module = test_mod,
-        });
-        const run_t = b.addRunArtifact(t);
-        test_step.dependOn(&run_t.step);
-    }
+    const test_slow_core_root = addTestRoot(b, target, optimize, "src/test_slow_core.zig");
+    const test_slow_core_step = b.step("test-slow-core", "Run slower graph and network-heavy core tests");
+    test_slow_core_step.dependOn(test_slow_core_root);
+
+    const test_peer_step = b.step("test-peer", "Run peer-heavy core tests");
+    test_peer_step.dependOn(addFilteredTestRoot(
+        b,
+        target,
+        optimize,
+        "src/test_slow_core.zig",
+        &.{"node.peer.test.Peer:"},
+    ));
+
+    const test_topology_step = b.step("test-topology", "Run topology-heavy core tests");
+    test_topology_step.dependOn(addFilteredTestRoot(
+        b,
+        target,
+        optimize,
+        "src/test_slow_core.zig",
+        &.{"node.topology.test.Topology:"},
+    ));
 
     // ---------------------------------------------------------------
-    // Zig demonstration executable (`zig build zig-demo`)
+    // ZeroTea demonstration executable (`zig build zig-demo`)
     // ---------------------------------------------------------------
     // Demonstrates the converted Zig modules working together on Mac/Linux.
     // Shows Node initialization, identity generation, packet operations,
@@ -132,16 +153,16 @@ pub fn build(b: *std.Build) void {
     demo_mod.addIncludePath(b.path("."));
 
     const demo_exe = b.addExecutable(.{
-        .name = "zerotier-zig-demo",
+        .name = "zerotea-demo",
         .root_module = demo_mod,
     });
 
     b.installArtifact(demo_exe);
 
-    // `zig build zig-demo` -- build and run the Zig demonstration
+    // `zig build zig-demo` -- build and run the ZeroTea demonstration
     const run_demo = b.addRunArtifact(demo_exe);
     run_demo.step.dependOn(b.getInstallStep());
-    const demo_step = b.step("zig-demo", "Build and run the ZeroTier Zig demonstration");
+    const demo_step = b.step("zig-demo", "Build and run the ZeroTea demonstration");
     demo_step.dependOn(&run_demo.step);
 
     // ---------------------------------------------------------------
@@ -154,7 +175,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const bench_simple_exe = b.addExecutable(.{
-        .name = "zerotier-benchmark-simple",
+        .name = "zerotea-benchmark-simple",
         .root_module = bench_simple_mod,
     });
 
@@ -162,22 +183,22 @@ pub fn build(b: *std.Build) void {
 
     const run_bench_simple = b.addRunArtifact(bench_simple_exe);
     run_bench_simple.step.dependOn(b.getInstallStep());
-    const bench_simple_step = b.step("bench-info", "Show Zig vs C++ benchmark comparison info");
+    const bench_simple_step = b.step("bench-info", "Show ZeroTea vs C++ benchmark comparison info");
     bench_simple_step.dependOn(&run_bench_simple.step);
 
     // ---------------------------------------------------------------
-    // ZeroTier Service (`zig build service`)
+    // ZeroTea Service (`zig build service`)
     // ---------------------------------------------------------------
-    // The main ZeroTier daemon/service with UDP/TUN support
+    // The main ZeroTea daemon/service with UDP/TUN support
     const service_mod = b.createModule(.{
-        .root_source_file = b.path("src/zerotier_one.zig"),
+        .root_source_file = b.path("src/zerotea.zig"),
         .target = target,
         .optimize = optimize,
     });
     service_mod.addIncludePath(b.path("."));
 
     const service_exe = b.addExecutable(.{
-        .name = "zerotier-one",
+        .name = "zerotea",
         .root_module = service_mod,
     });
     service_exe.linkLibC();
@@ -189,11 +210,11 @@ pub fn build(b: *std.Build) void {
         run_service.addArgs(args);
     }
     run_service.step.dependOn(b.getInstallStep());
-    const service_step = b.step("service", "Build and run ZeroTier service (use: zig build service -- -p 9995)");
+    const service_step = b.step("service", "Build and run ZeroTea service (use: zig build service -- -p 9995)");
     service_step.dependOn(&run_service.step);
 
     // ---------------------------------------------------------------
-    // Zig selftest (`zig build selftest`)
+    // ZeroTea selftest (`zig build selftest`)
     // ---------------------------------------------------------------
     // Pure Zig crypto performance benchmarks for direct comparison with C++
     // Compare with C++ version: make selftest
@@ -205,7 +226,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const selftest_exe = b.addExecutable(.{
-        .name = "zerotier-selftest",
+        .name = "zerotea-selftest",
         .root_module = selftest_mod,
     });
 
@@ -213,7 +234,7 @@ pub fn build(b: *std.Build) void {
 
     const run_selftest = b.addRunArtifact(selftest_exe);
     run_selftest.step.dependOn(b.getInstallStep());
-    const selftest_step = b.step("selftest", "Run Zig crypto benchmarks (pure Zig, compare with: make selftest)");
+    const selftest_step = b.step("selftest", "Run ZeroTea crypto benchmarks (compare with: make selftest)");
     selftest_step.dependOn(&run_selftest.step);
 
     // ---------------------------------------------------------------
@@ -228,7 +249,7 @@ pub fn build(b: *std.Build) void {
     bench_packets_mod.addIncludePath(b.path("."));
 
     const bench_packets_exe = b.addExecutable(.{
-        .name = "zerotier-bench-packets",
+        .name = "zerotea-bench-packets",
         .root_module = bench_packets_mod,
     });
     bench_packets_exe.linkLibC();
@@ -438,16 +459,16 @@ pub fn build(b: *std.Build) void {
     // ---------------------------------------------------------------
     // macOS Tray App (`zig build tray`)
     // ---------------------------------------------------------------
-    // Native macOS menu bar application for ZeroTier
+    // Native macOS menu bar application for ZeroTea
     // Uses Cocoa/AppKit via Objective-C FFI
     const tray_mod = b.createModule(.{
-        .root_source_file = b.path("src/zerotier_tray.zig"),
+        .root_source_file = b.path("src/zerotea_tray.zig"),
         .target = target,
         .optimize = optimize,
     });
 
     const tray_exe = b.addExecutable(.{
-        .name = "ZeroTierTray",
+        .name = "ZeroTeaTray",
         .root_module = tray_mod,
     });
 
@@ -470,7 +491,7 @@ pub fn build(b: *std.Build) void {
 
     const run_tray = b.addRunArtifact(tray_exe);
     run_tray.step.dependOn(b.getInstallStep());
-    const tray_step = b.step("tray", "Build and run macOS tray app (requires: zerotier-one service)");
+    const tray_step = b.step("tray", "Build and run macOS tray app (requires: zerotea service)");
     tray_step.dependOn(&run_tray.step);
 
     // ---------------------------------------------------------------

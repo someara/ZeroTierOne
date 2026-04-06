@@ -1,8 +1,8 @@
 #!/bin/bash
-# GUI smoke test for ZeroTier tray app
+# GUI smoke test for ZeroTea tray app
 #
 # Prerequisites:
-#   - zerotier-one running on localhost:9993
+#   - zerotea running on localhost:9993
 #   - Terminal needs Accessibility permissions:
 #     System Settings > Privacy & Security > Accessibility > Terminal (enable)
 #
@@ -25,7 +25,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "=== ZeroTier Tray App - GUI Smoke Test ==="
+echo "=== ZeroTea Tray App - GUI Smoke Test ==="
 echo ""
 
 # Build
@@ -34,8 +34,8 @@ zig build -Doptimize=Debug 2>&1
 echo ""
 
 # Launch app in background
-echo "Launching ZeroTierTray..."
-./zig-out/bin/ZeroTierTray &
+echo "Launching ZeroTeaTray..."
+./zig-out/bin/ZeroTeaTray &
 TRAY_PID=$!
 sleep 2
 
@@ -51,7 +51,7 @@ echo ""
 echo "Test 1: Menu bar item exists"
 if osascript -e '
     tell application "System Events"
-        tell process "ZeroTierTray"
+        tell process "ZeroTeaTray"
             return exists menu bar item 1 of menu bar 2
         end tell
     end tell
@@ -65,7 +65,7 @@ fi
 echo "Test 2: Menu opens with expected items"
 MENU_ITEMS=$(osascript -e '
     tell application "System Events"
-        tell process "ZeroTierTray"
+        tell process "ZeroTeaTray"
             click menu bar item 1 of menu bar 2
             delay 0.5
             set itemNames to name of every menu item of menu 1 of menu bar item 1 of menu bar 2
@@ -98,7 +98,7 @@ fi
 echo "Test 3: Join Network dialog"
 DIALOG_RESULT=$(osascript -e '
     tell application "System Events"
-        tell process "ZeroTierTray"
+        tell process "ZeroTeaTray"
             click menu bar item 1 of menu bar 2
             delay 0.5
             click menu item "Join Network..." of menu 1 of menu bar item 1 of menu bar 2
@@ -133,7 +133,7 @@ echo -n "CLEAR" | pbcopy
 
 osascript -e '
     tell application "System Events"
-        tell process "ZeroTierTray"
+        tell process "ZeroTeaTray"
             click menu bar item 1 of menu bar 2
             delay 0.5
             click menu item "Copy Node ID" of menu 1 of menu bar item 1 of menu bar 2
@@ -155,7 +155,7 @@ fi
 echo "Test 5: Status header"
 HEADER=$(osascript -e '
     tell application "System Events"
-        tell process "ZeroTierTray"
+        tell process "ZeroTeaTray"
             click menu bar item 1 of menu bar 2
             delay 0.5
             set firstItem to name of menu item 1 of menu 1 of menu bar item 1 of menu bar 2
@@ -175,7 +175,7 @@ fi
 echo "Test 6: Quit"
 osascript -e '
     tell application "System Events"
-        tell process "ZeroTierTray"
+        tell process "ZeroTeaTray"
             click menu bar item 1 of menu bar 2
             delay 0.5
             click menu item "Quit" of menu 1 of menu bar item 1 of menu bar 2

@@ -1,21 +1,21 @@
-# ZeroTier: Zig vs C++ Crypto Performance Comparison
+# ZeroTea vs C++ Crypto Performance Comparison
 
 ## Quick Benchmark Commands
 
 ```bash
-# Pure Zig crypto benchmarks (RECOMMENDED - always works)
+# Pure ZeroTea crypto benchmarks (RECOMMENDED - always works)
 zig build selftest -Doptimize=ReleaseFast
 
 # C++ crypto benchmarks (from original implementation)
 make selftest && ./zerotier-selftest
 ```
 
-**Note**: Both selftests now work reliably. The C++ build is handled by `make` (unchanged from upstream), while the Zig build is handled by `zig build` (pure Zig, no C++ dependencies).
+**Note**: Both selftests now work reliably. The C++ build is handled by `make` (unchanged from upstream), while the ZeroTea build is handled by `zig build` (pure Zig, no C++ dependencies).
 
 ## Results (Apple Silicon M3 Max)
 
-| Algorithm | Zig (MiB/s) | C++ (MiB/s) | Zig vs C++ |
-|-----------|-------------|-------------|------------|
+| Algorithm | ZeroTea (MiB/s) | C++ (MiB/s) | ZeroTea vs C++ |
+|-----------|------------------|-------------|-----------------|
 | **Salsa20/12** | 1,056 | 1,993 | 53% |
 | **Salsa20/20** | 1,021 | 1,122 | 91% |
 | **Poly1305** | 2,274 | 2,907 | 78% |
@@ -26,8 +26,8 @@ make selftest && ./zerotier-selftest
 
 ## Key Observations
 
-### Zig Wins
-- **ECC operations (C25519, Ed25519)**: Dramatically faster in Zig
+### ZeroTea Wins
+- **ECC operations (C25519, Ed25519)**: Dramatically faster in ZeroTea
   - C25519 key agreement: **3x faster** (0.02ms vs 0.06ms)
   - Ed25519 signatures: **223x faster** (0.02ms vs 4.46ms)
   - Likely due to Zig's direct use of optimized std.crypto vs C++ custom implementation
@@ -74,12 +74,12 @@ make selftest && ./zerotier-selftest
 
 ## Overall Assessment
 
-### Zig Advantages
+### ZeroTea Advantages
 ✅ **Dramatically faster ECC** (most important for identity/crypto)
 ✅ **Memory safe** (no undefined behavior)
 ✅ **Cross-platform consistent** (same performance everywhere)
 ✅ **Simpler build** (no CMake, no assembly, no UB workarounds)
-✅ **Better testing** (673 tests vs limited C++ coverage)
+✅ **Broader ZeroTea-side test coverage** than the upstream C++ selftest path
 
 ### C++ Advantages
 ✅ **Faster stream ciphers on x86_64** (hand-optimized assembly)
@@ -88,14 +88,14 @@ make selftest && ./zerotier-selftest
 
 ## Recommendations
 
-1. **For identity/key operations**: Zig is significantly faster and safer
+1. **For identity/key operations**: ZeroTea is significantly faster and safer
 2. **For bulk packet encryption**: C++ has edge on x86_64 (assembly)
 3. **For new features**: Zig provides better development velocity
 4. **For production**: Both are viable; Zig offers better safety guarantees
 
 ## Future Optimizations
 
-Potential areas to improve Zig performance:
+Potential areas to improve ZeroTea performance:
 
 1. **Platform-specific Salsa20**: Add x86_64 SIMD intrinsics
 2. **Poly1305**: Use hardware acceleration where available
@@ -108,7 +108,7 @@ However, the current Zig performance is already excellent - especially for the c
 Both benchmarks require release-mode optimization:
 
 ```bash
-# Zig benchmarks
+# ZeroTea benchmarks
 zig build selftest -Doptimize=ReleaseFast
 
 # C++ benchmarks (via make)

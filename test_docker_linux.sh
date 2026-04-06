@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test ZeroTier Linux TUN device using Docker
+# Test ZeroTea Linux TUN device using Docker
 #
 # Uses Docker with --privileged flag to access TUN devices
 
@@ -13,7 +13,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 echo -e "${BLUE}════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}  ZeroTier Docker Linux Test${NC}"
+echo -e "${BLUE}  ZeroTea Docker Linux Test${NC}"
 echo -e "${BLUE}════════════════════════════════════════════════════════${NC}"
 echo ""
 

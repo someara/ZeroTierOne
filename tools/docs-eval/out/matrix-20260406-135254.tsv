@@ -1,0 +1,3 @@
+runner	model	run_status	score_status	output_file
+claude	haiku	timeout	fail	/Users/someara/src/ZeroTierOne/tools/docs-eval/out/claude-haiku.json
+opencode	github-copilot/gpt-5-mini	ok	fail	/Users/someara/src/ZeroTierOne/tools/docs-eval/out/opencode-github-copilot_gpt-5-mini.json

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Setup OrbStack Ubuntu VM for ZeroTier Linux testing
+# Setup OrbStack Ubuntu VM for ZeroTea Linux testing
 #
 # This script automates the setup of an OrbStack VM for testing
 # the Linux TUN device implementation.
@@ -14,7 +14,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}  ZeroTier OrbStack Test Setup${NC}"
+echo -e "${BLUE}  ZeroTea OrbStack Test Setup${NC}"
 echo -e "${BLUE}════════════════════════════════════════════════════════${NC}"
 echo ""
 
@@ -117,7 +117,7 @@ echo -e "${BLUE}─────────────────────�
 echo -e "${BLUE}Syncing Project Files${NC}"
 echo -e "${BLUE}──────────────────────────────────────────────────────${NC}"
 
-echo "Copying ZeroTier project to VM..."
+echo "Copying ZeroTea project to VM..."
 # OrbStack mounts macOS home directory automatically, but we'll copy for isolation
 orb run -m "$VM_NAME" -- mkdir -p /home/ubuntu/ZeroTierOne
 

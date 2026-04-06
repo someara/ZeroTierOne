@@ -28,8 +28,15 @@ const MAC = @import("mac.zig").MAC;
 const InetAddress = @import("inet_address.zig");
 const ecc = @import("ecc.zig");
 const Aes = @import("aes.zig").Aes;
+const CertificateOfMembership = @import("certificate_of_membership.zig").CertificateOfMembership;
 const Identity = @import("identity.zig").Identity;
+const network_controller_mod = @import("network_controller.zig");
+const Dictionary = @import("dictionary.zig").Dictionary;
+const metrics = @import("metrics.zig");
+const Peer = @import("peer.zig").Peer;
+const Network = @import("network.zig").Network;
 const MulticastGroup = @import("multicast_group.zig").MulticastGroup;
+const Path = @import("path.zig").Path;
 const world_mod = @import("world.zig");
 const World = world_mod.World;
 const WorldType = world_mod.Type;
@@ -52,6 +59,334 @@ const version_minor: u8 = 16;
 const version_revision: u16 = 1;
 
 // ── Callbacks ─────────────────────────────────────────────────────
+
+pub const PeerCallbacks = struct {
+    peerKey: *const fn (ctx: ?*anyopaque, peer: ?*Peer) *const [32]u8,
+    peerAesKeys: *const fn (ctx: ?*anyopaque, peer: ?*Peer) ?*const [2]Aes,
+    peerAesKeysIfSupported: *const fn (ctx: ?*anyopaque, peer: ?*Peer) ?*const [2]Aes,
+    peerPublicKey: *const fn (ctx: ?*anyopaque, peer: ?*Peer) *const ecc.Public,
+    peerAddress: *const fn (ctx: ?*anyopaque, peer: ?*Peer) u64,
+    peerReceived: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        peer: ?*Peer,
+        path: ?*Path,
+        hops_val: u32,
+        packet_id: u64,
+        payload_len: u32,
+        verb_val: u32,
+        in_re_packet_id: u64,
+        in_re_verb: u32,
+        trust_established: bool,
+        network_id: u64,
+        flow_id: i32,
+    ) void,
+    peerRecordIncomingInvalidPacket: *const fn (
+        ctx: ?*anyopaque,
+        peer: ?*Peer,
+        path: ?*Path,
+    ) void,
+    peerRecordOutgoingPacket: *const fn (
+        ctx: ?*anyopaque,
+        peer: ?*Peer,
+        path: ?*Path,
+        packet_id: u64,
+        payload_len: u32,
+        verb_val: u32,
+        flow_id: i32,
+        now_val: i64,
+    ) void,
+    peerRateGateQoS: *const fn (
+        ctx: ?*anyopaque,
+        peer: ?*Peer,
+        now_val: i64,
+        path: ?*Path,
+    ) bool,
+    peerReceivedQoS: *const fn (
+        ctx: ?*anyopaque,
+        peer: ?*Peer,
+        path: ?*Path,
+        now_val: i64,
+        count: u32,
+        rx_ids: [*]const u64,
+        rx_ts: [*]const u16,
+    ) void,
+    peerRateGatePathNegotiation: *const fn (
+        ctx: ?*anyopaque,
+        peer: ?*Peer,
+        now_val: i64,
+        path: ?*Path,
+    ) bool,
+    peerProcessIncomingPathNegotiationRequest: *const fn (
+        ctx: ?*anyopaque,
+        peer: ?*Peer,
+        now_val: i64,
+        path: ?*Path,
+        remote_utility: i16,
+    ) void,
+    peerFlowHashingSupported: *const fn (
+        ctx: ?*anyopaque,
+        peer: ?*Peer,
+    ) bool,
+    peerIdentity: *const fn (ctx: ?*anyopaque, peer: ?*Peer) *const Identity,
+    peerSetRemoteVersion: *const fn (
+        ctx: ?*anyopaque,
+        peer: ?*Peer,
+        proto: u32,
+        major: u32,
+        minor: u32,
+        rev: u32,
+    ) void,
+    peerRateGateInboundWhoisRequest: *const fn (
+        ctx: ?*anyopaque,
+        peer: ?*Peer,
+        now_val: i64,
+    ) bool,
+    peerAttemptToContactAt: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        peer: ?*Peer,
+        local_socket: i64,
+        at_addr: *const InetAddress.InetAddress,
+        now_val: i64,
+        always_send_hello: bool,
+    ) void,
+    peerReceivePushDirectPaths: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        peer: ?*Peer,
+        paths_data: [*]const u8,
+        paths_len: u32,
+        now_val: i64,
+    ) void,
+};
+
+pub const PathCallbacks = struct {
+    pathSend: *const fn (
+        ctx: ?*anyopaque,
+        path: ?*Path,
+        tptr: ?*anyopaque,
+        data: [*]const u8,
+        len: u32,
+        now_val: i64,
+    ) void,
+    pathAddress: *const fn (
+        ctx: ?*anyopaque,
+        path: ?*Path,
+    ) *const InetAddress.InetAddress,
+    pathLocalSocket: *const fn (
+        ctx: ?*anyopaque,
+        path: ?*Path,
+    ) i64,
+    pathRateGateEchoRequest: *const fn (
+        ctx: ?*anyopaque,
+        path: ?*Path,
+        now_val: i64,
+    ) bool,
+    pathUpdateLatency: *const fn (
+        ctx: ?*anyopaque,
+        path: ?*Path,
+        latency: u32,
+        now_val: i64,
+    ) void,
+};
+
+pub const SwitchCallbacks = struct {
+    switchRequestWhois: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        now_val: i64,
+        addr: u64,
+    ) void,
+    switchDoAnythingWaitingForPeer: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        peer: ?*Peer,
+    ) void,
+};
+
+pub const TopologyCallbacks = struct {
+    topologyAddPeer: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        new_identity: *const Identity,
+    ) ?*Peer,
+    topologyIsUpstream: *const fn (
+        ctx: ?*anyopaque,
+        identity: *const Identity,
+    ) bool,
+    topologyPlanetWorldId: *const fn (ctx: ?*anyopaque) u64,
+    topologyPlanetWorldTimestamp: *const fn (ctx: ?*anyopaque) u64,
+    topologySerializePlanet: *const fn (
+        ctx: ?*anyopaque,
+        buf: [*]u8,
+        buf_len: u32,
+    ) u32,
+    topologySerializeUpdatedMoons: *const fn (
+        ctx: ?*anyopaque,
+        moon_ids: [*]const u64,
+        moon_timestamps: [*]const u64,
+        moon_count: u32,
+        buf: [*]u8,
+        buf_len: u32,
+    ) u32,
+    topologyShouldAcceptWorldUpdateFrom: *const fn (
+        ctx: ?*anyopaque,
+        addr: u64,
+    ) bool,
+    topologyAddWorld: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        world_data: [*]const u8,
+        world_len: u32,
+    ) bool,
+    topologyAmUpstream: *const fn (ctx: ?*anyopaque) bool,
+    topologyGetIdentity: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        addr: u64,
+    ) ?*const Identity,
+};
+
+pub const NetworkCallbacks = struct {
+    nodeGetNetwork: *const fn (ctx: ?*anyopaque, nwid: u64) ?*Network,
+    nodeExpectingReplyTo: *const fn (ctx: ?*anyopaque, packet_id: u64) bool,
+    networkController: *const fn (ctx: ?*anyopaque, network: ?*Network) u64,
+    networkSetNotFound: *const fn (ctx: ?*anyopaque, tptr: ?*anyopaque, network: ?*Network) void,
+    networkSetAccessDenied: *const fn (ctx: ?*anyopaque, tptr: ?*anyopaque, network: ?*Network) void,
+    networkGate: *const fn (ctx: ?*anyopaque, tptr: ?*anyopaque, network: ?*Network, peer: ?*Peer) bool,
+    networkPeerRequestedCredentials: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        network: ?*Network,
+        addr: u64,
+        now_val: i64,
+    ) void,
+    networkConfigHasCom: *const fn (ctx: ?*anyopaque, network: ?*Network) bool,
+    networkSetAuthenticationRequired: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        network: ?*Network,
+        auth_url: [*:0]const u8,
+    ) void,
+    networkHandleConfigChunk: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        network: ?*Network,
+        packet_id: u64,
+        source_addr: u64,
+        chunk_data: [*]const u8,
+        chunk_offset: u32,
+        chunk_len: u32,
+    ) void,
+    networkAddCredentialCOM: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        network: ?*Network,
+        com_data: [*]const u8,
+        com_len: u32,
+    ) bool,
+    networkMac: *const fn (ctx: ?*anyopaque, network: ?*Network) MAC,
+    networkUserPtr: *const fn (ctx: ?*anyopaque, network: ?*Network) ?*anyopaque,
+    networkFilterIncomingPacket: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        network: ?*Network,
+        peer: ?*Peer,
+        local_addr: u64,
+        source_mac: *const MAC,
+        dest_mac: *const MAC,
+        frame_data: [*]const u8,
+        frame_len: u32,
+        ethertype: u32,
+        vlan_id: u32,
+    ) i32,
+    networkPushCredentials: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        peer_addr: u64,
+        network: ?*Network,
+        now_val: i64,
+        credentials_data: [*]const u8,
+        credentials_len: u32,
+    ) void,
+    networkControllerHandleConfigRequest: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        from_addr: *const InetAddress.InetAddress,
+        requester_identity: *const Identity,
+        packet_id: u64,
+        nwid: u64,
+        meta_data: *const Dictionary(network_controller_mod.metadata_dict_capacity),
+    ) bool,
+    networkHandleConfig: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        network: ?*Network,
+        packet_id: u64,
+        from_addr: u64,
+        chunk_data: [*]const u8,
+        chunk_len: u32,
+    ) void,
+};
+
+pub const MulticastCallbacks = struct {
+    multicasterRemove: *const fn (
+        ctx: ?*anyopaque,
+        nwid: u64,
+        mac_bytes: *const [6]u8,
+        adi: u32,
+        addr: u64,
+    ) void,
+    multicasterAddMultiple: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        now_val: i64,
+        nwid: u64,
+        mac_bytes: *const [6]u8,
+        adi: u32,
+        addresses_data: [*]const u8,
+        address_count: u32,
+        total_known: u32,
+    ) void,
+    multicasterAdd: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        now_val: i64,
+        nwid: u64,
+        mg: *const MulticastGroup,
+        addr: u64,
+    ) void,
+    multicasterGather: *const fn (
+        ctx: ?*anyopaque,
+        peer_addr: u64,
+        nwid: u64,
+        mg: *const MulticastGroup,
+        out_packet: *Packet,
+        limit: u32,
+    ) u32,
+    multicasterReceiveMulticastFrame: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        nwid: u64,
+        source_addr: u64,
+        mg: *const MulticastGroup,
+        frame_data: [*]const u8,
+        frame_len: u32,
+        ethertype: u32,
+    ) void,
+    multicasterReplicateMulticastFrame: *const fn (
+        ctx: ?*anyopaque,
+        tptr: ?*anyopaque,
+        nwid: u64,
+        origin_addr: u64,
+        source_mac: *const MAC,
+        mg: *const MulticastGroup,
+        frame_data: [*]const u8,
+        frame_len: u32,
+        ethertype: u32,
+    ) void,
+};
 
 /// Function-pointer table for all runtime interactions required by
 /// IncomingPacket. The runtime context (`ctx`) is threaded through
@@ -82,17 +417,7 @@ pub const Callbacks = struct {
         ctx: ?*anyopaque,
         tptr: ?*anyopaque,
         addr: u64,
-    ) ?*anyopaque,
-
-    // ── Switch ────────────────────────────────────────────────────
-
-    /// Request WHOIS for an unknown address.
-    switchRequestWhois: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        now_val: i64,
-        addr: u64,
-    ) void,
+    ) ?*Peer,
 
     // ── Node ──────────────────────────────────────────────────────
 
@@ -111,131 +436,12 @@ pub const Callbacks = struct {
         data: ?*const anyopaque,
     ) void,
 
-    // ── Peer ──────────────────────────────────────────────────────
-
-    /// Get the shared symmetric key for this peer (32 bytes).
-    peerKey: *const fn (ctx: ?*anyopaque, peer: ?*anyopaque) *const [32]u8,
-
-    /// Get AES key pair for this peer, or null if not available.
-    peerAesKeys: *const fn (ctx: ?*anyopaque, peer: ?*anyopaque) ?*const [2]Aes,
-
-    /// Get AES keys only if the peer supports AES.
-    peerAesKeysIfSupported: *const fn (ctx: ?*anyopaque, peer: ?*anyopaque) ?*const [2]Aes,
-
-    /// Get peer's public key.
-    peerPublicKey: *const fn (ctx: ?*anyopaque, peer: ?*anyopaque) *const ecc.Public,
-
-    /// Get peer's ZeroTier address as a u64.
-    peerAddress: *const fn (ctx: ?*anyopaque, peer: ?*anyopaque) u64,
-
-    /// Notify peer of a received packet.
-    peerReceived: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        peer: ?*anyopaque,
-        path: ?*anyopaque,
-        hops_val: u32,
-        packet_id: u64,
-        payload_len: u32,
-        verb_val: u32,
-        in_re_packet_id: u64,
-        in_re_verb: u32,
-        trust_established: bool,
-        network_id: u64,
-        flow_id: i32,
-    ) void,
-
-    /// Record an invalid incoming packet for rate limiting.
-    peerRecordIncomingInvalidPacket: *const fn (
-        ctx: ?*anyopaque,
-        peer: ?*anyopaque,
-        path: ?*anyopaque,
-    ) void,
-
-    /// Record an outgoing packet for QoS tracking.
-    peerRecordOutgoingPacket: *const fn (
-        ctx: ?*anyopaque,
-        peer: ?*anyopaque,
-        path: ?*anyopaque,
-        packet_id: u64,
-        payload_len: u32,
-        verb_val: u32,
-        flow_id: i32,
-        now_val: i64,
-    ) void,
-
-    /// Rate gate for QoS measurement packets.
-    peerRateGateQoS: *const fn (
-        ctx: ?*anyopaque,
-        peer: ?*anyopaque,
-        now_val: i64,
-        path: ?*anyopaque,
-    ) bool,
-
-    /// Pass received QoS data to peer.
-    peerReceivedQoS: *const fn (
-        ctx: ?*anyopaque,
-        peer: ?*anyopaque,
-        path: ?*anyopaque,
-        now_val: i64,
-        count: u32,
-        rx_ids: [*]const u64,
-        rx_ts: [*]const u16,
-    ) void,
-
-    /// Rate gate for path negotiation requests.
-    peerRateGatePathNegotiation: *const fn (
-        ctx: ?*anyopaque,
-        peer: ?*anyopaque,
-        now_val: i64,
-        path: ?*anyopaque,
-    ) bool,
-
-    /// Process an incoming path negotiation request.
-    peerProcessIncomingPathNegotiationRequest: *const fn (
-        ctx: ?*anyopaque,
-        peer: ?*anyopaque,
-        now_val: i64,
-        path: ?*anyopaque,
-        remote_utility: i16,
-    ) void,
-
-    /// Check if peer supports flow hashing.
-    peerFlowHashingSupported: *const fn (
-        ctx: ?*anyopaque,
-        peer: ?*anyopaque,
-    ) bool,
-
-    // ── Path ──────────────────────────────────────────────────────
-
-    /// Send raw data via a path.
-    pathSend: *const fn (
-        ctx: ?*anyopaque,
-        path: ?*anyopaque,
-        tptr: ?*anyopaque,
-        data: [*]const u8,
-        len: u32,
-        now_val: i64,
-    ) void,
-
-    /// Get the InetAddress of a path.
-    pathAddress: *const fn (
-        ctx: ?*anyopaque,
-        path: ?*anyopaque,
-    ) *const InetAddress.InetAddress,
-
-    /// Get the local socket handle of a path.
-    pathLocalSocket: *const fn (
-        ctx: ?*anyopaque,
-        path: ?*anyopaque,
-    ) i64,
-
-    /// Rate gate for echo requests on a path.
-    pathRateGateEchoRequest: *const fn (
-        ctx: ?*anyopaque,
-        path: ?*anyopaque,
-        now_val: i64,
-    ) bool,
+    peer: PeerCallbacks,
+    path: PathCallbacks,
+    sw: SwitchCallbacks,
+    topology: TopologyCallbacks,
+    network: NetworkCallbacks,
+    multicast: MulticastCallbacks,
 
     // ── Trace ─────────────────────────────────────────────────────
 
@@ -243,7 +449,7 @@ pub const Callbacks = struct {
     traceIncomingPacketMacFailure: *const fn (
         ctx: ?*anyopaque,
         tptr: ?*anyopaque,
-        path: ?*anyopaque,
+        path: ?*Path,
         packet_id: u64,
         source_addr: u64,
         hops_val: u32,
@@ -254,7 +460,7 @@ pub const Callbacks = struct {
     traceIncomingPacketInvalid: *const fn (
         ctx: ?*anyopaque,
         tptr: ?*anyopaque,
-        path: ?*anyopaque,
+        path: ?*Path,
         packet_id: u64,
         source_addr: u64,
         hops_val: u32,
@@ -266,7 +472,7 @@ pub const Callbacks = struct {
     traceIncomingPacketDroppedHELLO: *const fn (
         ctx: ?*anyopaque,
         tptr: ?*anyopaque,
-        path: ?*anyopaque,
+        path: ?*Path,
         packet_id: u64,
         from_addr: u64,
         reason: [*:0]const u8,
@@ -281,75 +487,6 @@ pub const Callbacks = struct {
         path_addr: *const InetAddress.InetAddress,
     ) bool,
 
-    /// Get the identity of a peer (by opaque handle).
-    peerIdentity: *const fn (ctx: ?*anyopaque, peer: ?*anyopaque) *const Identity,
-
-    /// Set remote version info on a peer.
-    peerSetRemoteVersion: *const fn (
-        ctx: ?*anyopaque,
-        peer: ?*anyopaque,
-        proto: u32,
-        major: u32,
-        minor: u32,
-        rev: u32,
-    ) void,
-
-    /// Add a new peer to the topology. Returns the canonical peer handle.
-    /// Takes the new peer's identity; the runtime creates the Peer object.
-    topologyAddPeer: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        new_identity: *const Identity,
-    ) ?*anyopaque,
-
-    /// Check if an identity is an upstream (root) node.
-    topologyIsUpstream: *const fn (
-        ctx: ?*anyopaque,
-        identity: *const Identity,
-    ) bool,
-
-    /// Get the planet world ID.
-    topologyPlanetWorldId: *const fn (ctx: ?*anyopaque) u64,
-
-    /// Get the planet world timestamp.
-    topologyPlanetWorldTimestamp: *const fn (ctx: ?*anyopaque) u64,
-
-    /// Serialize the planet world into the provided buffer.
-    /// Returns the number of bytes written, or 0 if no planet.
-    topologySerializePlanet: *const fn (
-        ctx: ?*anyopaque,
-        buf: [*]u8,
-        buf_len: u32,
-    ) u32,
-
-    /// Get moon count and serialize moons that are newer than given timestamps.
-    /// For each moon in the topology, if its ID matches one of the provided
-    /// IDs and its timestamp is newer, serialize it into buf.
-    /// Returns total bytes written.
-    topologySerializeUpdatedMoons: *const fn (
-        ctx: ?*anyopaque,
-        moon_ids: [*]const u64,
-        moon_timestamps: [*]const u64,
-        moon_count: u32,
-        buf: [*]u8,
-        buf_len: u32,
-    ) u32,
-
-    /// Check if we should accept world updates from this address.
-    topologyShouldAcceptWorldUpdateFrom: *const fn (
-        ctx: ?*anyopaque,
-        addr: u64,
-    ) bool,
-
-    /// Add a world (planet/moon) from serialized data.
-    /// Returns true if accepted.
-    topologyAddWorld: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        world_data: [*]const u8,
-        world_len: u32,
-    ) bool,
-
     /// Self-awareness: report our externally observed address.
     selfAwarenessIam: *const fn (
         ctx: ?*anyopaque,
@@ -362,124 +499,9 @@ pub const Callbacks = struct {
         now_val: i64,
     ) void,
 
-    /// Update path latency.
-    pathUpdateLatency: *const fn (
-        ctx: ?*anyopaque,
-        path: ?*anyopaque,
-        latency: u32,
-        now_val: i64,
-    ) void,
-
     // ── Network (ERROR / OK) ─────────────────────────────────────
 
-    /// Look up a network by ID. Returns opaque network handle or null.
-    nodeGetNetwork: *const fn (ctx: ?*anyopaque, nwid: u64) ?*anyopaque,
-
-    /// Check if node is expecting a reply to this packet ID.
-    nodeExpectingReplyTo: *const fn (ctx: ?*anyopaque, packet_id: u64) bool,
-
-    /// Get controller address for a network.
-    networkController: *const fn (ctx: ?*anyopaque, network: ?*anyopaque) u64,
-
-    /// Mark network as not found.
-    networkSetNotFound: *const fn (ctx: ?*anyopaque, tptr: ?*anyopaque, network: ?*anyopaque) void,
-
-    /// Mark network as access denied.
-    networkSetAccessDenied: *const fn (ctx: ?*anyopaque, tptr: ?*anyopaque, network: ?*anyopaque) void,
-
-    /// Gate check: is peer allowed to communicate on this network?
-    networkGate: *const fn (ctx: ?*anyopaque, tptr: ?*anyopaque, network: ?*anyopaque, peer: ?*anyopaque) bool,
-
-    /// Peer requested credentials for a network.
-    networkPeerRequestedCredentials: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        network: ?*anyopaque,
-        addr: u64,
-        now_val: i64,
-    ) void,
-
-    /// Check if network config has a COM.
-    networkConfigHasCom: *const fn (ctx: ?*anyopaque, network: ?*anyopaque) bool,
-
-    /// Set authentication required on a network, with URL data.
-    networkSetAuthenticationRequired: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        network: ?*anyopaque,
-        auth_url: [*:0]const u8,
-    ) void,
-
-    /// Handle a network config chunk from an OK response.
-    networkHandleConfigChunk: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        network: ?*anyopaque,
-        packet_id: u64,
-        source_addr: u64,
-        chunk_data: [*]const u8,
-        chunk_offset: u32,
-        chunk_len: u32,
-    ) void,
-
-    /// Remove a multicast group subscription.
-    multicasterRemove: *const fn (
-        ctx: ?*anyopaque,
-        nwid: u64,
-        mac_bytes: *const [6]u8,
-        adi: u32,
-        addr: u64,
-    ) void,
-
-    /// Add multiple multicast group members from gather results.
-    multicasterAddMultiple: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        now_val: i64,
-        nwid: u64,
-        mac_bytes: *const [6]u8,
-        adi: u32,
-        addresses_data: [*]const u8,
-        address_count: u32,
-        total_known: u32,
-    ) void,
-
-    /// Tell switch to process anything waiting for this peer.
-    switchDoAnythingWaitingForPeer: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        peer: ?*anyopaque,
-    ) void,
-
-    /// Add a credential (CertificateOfMembership) to a network.
-    /// Returns true if accepted.
-    networkAddCredentialCOM: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        network: ?*anyopaque,
-        com_data: [*]const u8,
-        com_len: u32,
-    ) bool,
-
-    // ── WHOIS / Rendezvous ────────────────────────────────────────
-
-    /// Check if the topology is an upstream node.
-    topologyAmUpstream: *const fn (ctx: ?*anyopaque) bool,
-
-    /// Rate gate inbound WHOIS requests.
-    peerRateGateInboundWhoisRequest: *const fn (
-        ctx: ?*anyopaque,
-        peer: ?*anyopaque,
-        now_val: i64,
-    ) bool,
-
-    /// Get an identity from the topology by address.
-    /// Returns a non-null identity pointer if found, null otherwise.
-    topologyGetIdentity: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        addr: u64,
-    ) ?*const Identity,
+    // ── Node / Wire ───────────────────────────────────────────────
 
     /// Check if path should be used for ZeroTier traffic.
     nodeShouldUsePathForZeroTierTraffic: *const fn (
@@ -504,40 +526,7 @@ pub const Callbacks = struct {
         ttl: u32,
     ) void,
 
-    /// Attempt to contact a peer at a specific address.
-    peerAttemptToContactAt: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        peer: ?*anyopaque,
-        local_socket: i64,
-        at_addr: *const InetAddress.InetAddress,
-        now_val: i64,
-        always_send_hello: bool,
-    ) void,
-
     // ── FRAME / EXT_FRAME ─────────────────────────────────────────
-
-    /// Get the MAC address for a network.
-    networkMac: *const fn (ctx: ?*anyopaque, network: ?*anyopaque) MAC,
-
-    /// Get the user pointer for a network (for callbacks).
-    networkUserPtr: *const fn (ctx: ?*anyopaque, network: ?*anyopaque) ?*anyopaque,
-
-    /// Filter an incoming packet through network rules.
-    /// Returns >0 if packet should be accepted, 0 if dropped.
-    networkFilterIncomingPacket: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        network: ?*anyopaque,
-        peer: ?*anyopaque,
-        local_addr: u64,
-        source_mac: *const MAC,
-        dest_mac: *const MAC,
-        frame_data: [*]const u8,
-        frame_len: u32,
-        ethertype: u32,
-        vlan_id: u32,
-    ) i32,
 
     /// Put a frame into the packet multiplexer for delivery to userspace.
     pmPutFrame: *const fn (
@@ -556,91 +545,18 @@ pub const Callbacks = struct {
 
     // ── MULTICAST_LIKE ────────────────────────────────────────────
 
-    /// Add a multicast group "like" (subscription announcement).
-    multicasterAdd: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        now_val: i64,
-        nwid: u64,
-        mg: *const MulticastGroup,
-        addr: u64,
-    ) void,
-
     // ── NETWORK_CREDENTIALS ───────────────────────────────────────
-
-    /// Process received network credentials (COM, capability, tags, certs, revocations).
-    networkPushCredentials: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        peer_addr: u64,
-        network: ?*anyopaque,
-        now_val: i64,
-        credentials_data: [*]const u8,
-        credentials_len: u32,
-    ) void,
 
     // ── NETWORK_CONFIG_REQUEST ────────────────────────────────────
 
-    /// Handle a network config request (controller side).
-    networkControllerHandleConfigRequest: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        from_addr: u64,
-        packet_id: u64,
-        nwid: u64,
-        meta_data: *const anyopaque,
-    ) void,
-
     // ── NETWORK_CONFIG ────────────────────────────────────────────
-
-    /// Handle a network config chunk (client side).
-    networkHandleConfig: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        network: ?*anyopaque,
-        packet_id: u64,
-        from_addr: u64,
-        chunk_data: [*]const u8,
-        chunk_len: u32,
-    ) void,
 
     // ── MULTICAST_GATHER ──────────────────────────────────────────
 
-    /// Handle a multicast gather request (send back subscribers).
-    multicasterGather: *const fn (
-        ctx: ?*anyopaque,
-        peer_addr: u64,
-        nwid: u64,
-        mg: *const MulticastGroup,
-        out_packet: *Packet,
-        limit: u32,
-    ) u32,
-
     // ── MULTICAST_FRAME ───────────────────────────────────────────
-
-    /// Handle received multicast frame - deliver to local subscribers.
-    multicasterReceiveMulticastFrame: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        nwid: u64,
-        source_addr: u64,
-        mg: *const MulticastGroup,
-        frame_data: [*]const u8,
-        frame_len: u32,
-        ethertype: u32,
-    ) void,
 
     // ── PUSH_DIRECT_PATHS ─────────────────────────────────────────
 
-    /// Handle received direct path hints from a peer.
-    peerReceivePushDirectPaths: *const fn (
-        ctx: ?*anyopaque,
-        tptr: ?*anyopaque,
-        peer: ?*anyopaque,
-        paths_data: [*]const u8,
-        paths_len: u32,
-        now_val: i64,
-    ) void,
 };
 
 // ── IncomingPacket ────────────────────────────────────────────────
@@ -650,7 +566,7 @@ pub const Callbacks = struct {
 pub const IncomingPacket = struct {
     pkt: Packet,
     receive_time: i64,
-    path: ?*anyopaque,
+    path: ?*Path,
     authenticated: bool,
 
     const Self = @This();
@@ -668,7 +584,7 @@ pub const IncomingPacket = struct {
     /// Create an IncomingPacket from raw data.
     pub fn init(
         data: []const u8,
-        path: ?*anyopaque,
+        path: ?*Path,
         now: i64,
     ) !Self {
         return .{
@@ -683,7 +599,7 @@ pub const IncomingPacket = struct {
     pub fn reinit(
         self: *Self,
         data: []const u8,
-        path: ?*anyopaque,
+        path: ?*Path,
         now: i64,
     ) !void {
         self.pkt.buf.setSize(0) catch |err| {
@@ -698,6 +614,11 @@ pub const IncomingPacket = struct {
     /// Time of packet receipt.
     pub fn receiveTime(self: *const Self) i64 {
         return self.receive_time;
+    }
+
+    /// Source address of the wrapped packet.
+    pub fn source(self: *const Self) Address {
+        return self.pkt.source();
     }
 
     // ── tryDecode ─────────────────────────────────────────────────
@@ -747,7 +668,7 @@ pub const IncomingPacket = struct {
         const cs = self.pkt.cipher();
         if (cs == .no_crypto_trusted_path) {
             const tpid = self.pkt.trustedPathId();
-            const path_addr = cb.pathAddress(cb.ctx, self.path);
+            const path_addr = cb.path.pathAddress(cb.ctx, self.path);
             if (cb.topologyShouldInboundPathBeTrusted(cb.ctx, path_addr, tpid)) {
                 self.authenticated = true;
             } else {
@@ -771,8 +692,8 @@ pub const IncomingPacket = struct {
         const peer = cb.topologyGetPeer(cb.ctx, cb.tptr, source_address.toInt());
         if (peer) |p| {
             if (!self.authenticated) {
-                const peer_key = cb.peerKey(cb.ctx, p);
-                const peer_aes = cb.peerAesKeys(cb.ctx, p);
+                const peer_key = cb.peer.peerKey(cb.ctx, p);
+                const peer_aes = cb.peer.peerAesKeys(cb.ctx, p);
                 if (!self.pkt.dearmor(peer_key, peer_aes, &cb.local_identity._private_key)) {
                     cb.traceIncomingPacketMacFailure(
                         cb.ctx,
@@ -783,7 +704,7 @@ pub const IncomingPacket = struct {
                         @as(u32, self.pkt.hops()),
                         "invalid MAC",
                     );
-                    cb.peerRecordIncomingInvalidPacket(cb.ctx, p, self.path);
+                    cb.peer.peerRecordIncomingInvalidPacket(cb.ctx, p, self.path);
                     return true;
                 }
             }
@@ -829,7 +750,7 @@ pub const IncomingPacket = struct {
                 .path_negotiation_request => self.doPATH_NEGOTIATION_REQUEST(cb, p),
                 _ => blk: {
                     // Unknown verb — if authenticated, count as received.
-                    cb.peerReceived(
+                    cb.peer.peerReceived(
                         cb.ctx,
                         cb.tptr,
                         p,
@@ -855,7 +776,7 @@ pub const IncomingPacket = struct {
             return false;
         } else {
             // Unknown peer — request WHOIS and retry later.
-            cb.switchRequestWhois(
+            cb.sw.switchRequestWhois(
                 cb.ctx,
                 cb.tptr,
                 cb.now(cb.ctx),
@@ -868,7 +789,7 @@ pub const IncomingPacket = struct {
     // ── Simple verb handlers (Chunk 1) ────────────────────────────
 
     /// ACK handler — currently a no-op (flow control is commented out in C++).
-    fn doACK(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doACK(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         _ = self;
         _ = cb;
         _ = peer;
@@ -878,10 +799,10 @@ pub const IncomingPacket = struct {
 
     /// QoS measurement handler — parses packet ID / timestamp pairs and
     /// passes them to the peer for latency tracking.
-    fn doQosMeasurement(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doQosMeasurement(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         const now = cb.now(cb.ctx);
 
-        if (!cb.peerRateGateQoS(cb.ctx, peer, now, self.path)) {
+        if (!cb.peer.peerRateGateQoS(cb.ctx, peer, now, self.path)) {
             return true;
         }
 
@@ -910,7 +831,7 @@ pub const IncomingPacket = struct {
         }
 
         if (count > 0) {
-            cb.peerReceivedQoS(
+            cb.peer.peerReceivedQoS(
                 cb.ctx,
                 peer,
                 self.path,
@@ -925,17 +846,17 @@ pub const IncomingPacket = struct {
     }
 
     /// ECHO handler — reflects payload back in an OK response.
-    fn doECHO(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doECHO(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         const now = cb.now(cb.ctx);
-        if (!cb.pathRateGateEchoRequest(cb.ctx, self.path, now)) {
+        if (!cb.path.pathRateGateEchoRequest(cb.ctx, self.path, now)) {
             return true;
         }
 
         const pid = self.pkt.packetId();
-        const peer_key = cb.peerKey(cb.ctx, peer);
-        const peer_aes = cb.peerAesKeysIfSupported(cb.ctx, peer);
-        const peer_pub = cb.peerPublicKey(cb.ctx, peer);
-        const peer_addr = Address.init(cb.peerAddress(cb.ctx, peer));
+        const peer_key = cb.peer.peerKey(cb.ctx, peer);
+        const peer_aes = cb.peer.peerAesKeysIfSupported(cb.ctx, peer);
+        const peer_pub = cb.peer.peerPublicKey(cb.ctx, peer);
+        const peer_addr = Address.init(cb.peer.peerAddress(cb.ctx, peer));
 
         var outp = Packet.initNew(peer_addr, cb.local_identity.address(), .ok);
         outp.buf.appendByte(@intFromEnum(Verb.echo), 1) catch return true;
@@ -950,7 +871,7 @@ pub const IncomingPacket = struct {
         }
 
         outp.armor(peer_key, true, false, peer_aes, peer_pub);
-        cb.peerRecordOutgoingPacket(
+        cb.peer.peerRecordOutgoingPacket(
             cb.ctx,
             peer,
             self.path,
@@ -962,9 +883,9 @@ pub const IncomingPacket = struct {
         );
 
         const out_data = outp.buf.data();
-        cb.pathSend(cb.ctx, self.path, cb.tptr, out_data.ptr, @intCast(out_data.len), now);
+        cb.path.pathSend(cb.ctx, self.path, cb.tptr, out_data.ptr, @intCast(out_data.len), now);
 
-        cb.peerReceived(
+        cb.peer.peerReceived(
             cb.ctx,
             cb.tptr,
             peer,
@@ -984,7 +905,7 @@ pub const IncomingPacket = struct {
     }
 
     /// USER_MESSAGE handler — posts user message event to application.
-    fn doUSER_MESSAGE(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doUSER_MESSAGE(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         if (self.pkt.buf.size() >= (packet.idx_payload + 8)) {
             const type_id = self.pkt.buf.at(u64, packet.idx_payload) catch {
                 return true;
@@ -994,7 +915,7 @@ pub const IncomingPacket = struct {
 
             // Build ZT_UserMessage on the stack.
             var um: c_api.ZT_UserMessage = .{
-                .origin = cb.peerAddress(cb.ctx, peer),
+                .origin = cb.peer.peerAddress(cb.ctx, peer),
                 .typeId = type_id,
                 .data = null,
                 .length = @intCast(data_len),
@@ -1014,7 +935,7 @@ pub const IncomingPacket = struct {
             );
         }
 
-        cb.peerReceived(
+        cb.peer.peerReceived(
             cb.ctx,
             cb.tptr,
             peer,
@@ -1035,7 +956,7 @@ pub const IncomingPacket = struct {
 
     /// REMOTE_TRACE handler — extracts null-terminated strings and
     /// posts each as a ZT_EVENT_REMOTE_TRACE event.
-    fn doREMOTE_TRACE(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doREMOTE_TRACE(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         const pkt_size = self.pkt.buf.size();
         if (pkt_size > packet.idx_payload) {
             const payload_len = pkt_size - packet.idx_payload;
@@ -1049,7 +970,7 @@ pub const IncomingPacket = struct {
                     const str_len = i - start;
                     if (str_len > 0 and str_len <= c_api.ZT_MAX_REMOTE_TRACE_SIZE) {
                         var rt: c_api.ZT_RemoteTrace = .{
-                            .origin = cb.peerAddress(cb.ctx, peer),
+                            .origin = cb.peer.peerAddress(cb.ctx, peer),
                             .data = @ptrCast(@constCast(payload_data[start..].ptr)),
                             .len = @intCast(str_len),
                         };
@@ -1065,7 +986,7 @@ pub const IncomingPacket = struct {
             }
         }
 
-        cb.peerReceived(
+        cb.peer.peerReceived(
             cb.ctx,
             cb.tptr,
             peer,
@@ -1085,10 +1006,10 @@ pub const IncomingPacket = struct {
     }
 
     /// PATH_NEGOTIATION_REQUEST handler — passes remote utility to peer.
-    fn doPATH_NEGOTIATION_REQUEST(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doPATH_NEGOTIATION_REQUEST(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         const now = cb.now(cb.ctx);
 
-        if (!cb.peerRateGatePathNegotiation(cb.ctx, peer, now, self.path)) {
+        if (!cb.peer.peerRateGatePathNegotiation(cb.ctx, peer, now, self.path)) {
             return true;
         }
 
@@ -1098,7 +1019,7 @@ pub const IncomingPacket = struct {
         }
 
         const remote_utility = self.pkt.buf.at(i16, packet.idx_payload) catch return true;
-        cb.peerProcessIncomingPathNegotiationRequest(cb.ctx, peer, now, self.path, remote_utility);
+        cb.peer.peerProcessIncomingPathNegotiationRequest(cb.ctx, peer, now, self.path, remote_utility);
 
         return true;
     }
@@ -1107,13 +1028,13 @@ pub const IncomingPacket = struct {
     fn sendErrorNeedCredentials(
         self: *Self,
         cb: *const Callbacks,
-        peer: ?*anyopaque,
+        peer: ?*Peer,
         nwid: u64,
     ) void {
-        const peer_key = cb.peerKey(cb.ctx, peer);
-        const peer_aes = cb.peerAesKeysIfSupported(cb.ctx, peer);
-        const peer_pub = cb.peerPublicKey(cb.ctx, peer);
-        const peer_addr = Address.init(cb.peerAddress(cb.ctx, peer));
+        const peer_key = cb.peer.peerKey(cb.ctx, peer);
+        const peer_aes = cb.peer.peerAesKeysIfSupported(cb.ctx, peer);
+        const peer_pub = cb.peer.peerPublicKey(cb.ctx, peer);
+        const peer_addr = Address.init(cb.peer.peerAddress(cb.ctx, peer));
 
         var outp = Packet.initNew(
             peer_addr,
@@ -1127,7 +1048,7 @@ pub const IncomingPacket = struct {
         outp.armor(peer_key, true, false, peer_aes, peer_pub);
 
         const out_data = outp.buf.data();
-        cb.pathSend(
+        cb.path.pathSend(
             cb.ctx,
             self.path,
             cb.tptr,
@@ -1135,6 +1056,34 @@ pub const IncomingPacket = struct {
             @intCast(out_data.len),
             cb.now(cb.ctx),
         );
+    }
+
+    /// Send ERROR_UNSUPPORTED_OPERATION for network config requests.
+    fn sendErrorUnsupportedOperation(
+        self: *Self,
+        cb: *const Callbacks,
+        peer: ?*Peer,
+        request_packet_id: u64,
+        nwid: u64,
+    ) void {
+        const p = peer orelse return;
+        const path = self.path orelse return;
+
+        const peer_key = cb.peer.peerKey(cb.ctx, p);
+        const peer_aes = cb.peer.peerAesKeysIfSupported(cb.ctx, p);
+        const peer_pub = cb.peer.peerPublicKey(cb.ctx, p);
+        const peer_addr = Address.init(cb.peer.peerAddress(cb.ctx, p));
+
+        var outp = Packet.initNew(peer_addr, cb.local_identity.address(), .@"error");
+        outp.buf.appendByte(@intFromEnum(Verb.network_config_request), 1) catch return;
+        outp.buf.appendInt(u64, request_packet_id) catch return;
+        outp.buf.appendByte(@intFromEnum(ErrorCode.unsupported_operation), 1) catch return;
+        outp.buf.appendInt(u64, nwid) catch return;
+        outp.armor(peer_key, true, false, peer_aes, peer_pub);
+        metrics.pkt_error_out.unsupported_op.inc();
+
+        const out_data = outp.buf.data();
+        cb.path.pathSend(cb.ctx, path, cb.tptr, out_data.ptr, @intCast(out_data.len), cb.now(cb.ctx));
     }
 
     // ── Stub handlers (Chunks 2 & 3) ─────────────────────────────
@@ -1209,13 +1158,13 @@ pub const IncomingPacket = struct {
         if (peer != null) {
             // We already have an identity with this address.
             if (!already_authenticated) {
-                const existing_id = cb.peerIdentity(cb.ctx, peer);
+                const existing_id = cb.peer.peerIdentity(cb.ctx, peer);
                 if (!existing_id.eql(&id)) {
                     // Identity collision — different identity for same address.
                     if (!cb.nodeRateGateIdentityVerification(
                         cb.ctx,
                         now,
-                        cb.pathAddress(cb.ctx, self.path),
+                        cb.path.pathAddress(cb.ctx, self.path),
                     )) {
                         return true;
                     }
@@ -1241,7 +1190,7 @@ pub const IncomingPacket = struct {
                             outp.buf.appendByte(@intFromEnum(ErrorCode.identity_collision), 1) catch return true;
                             outp.armor(key[0..32], true, false, null, &id._public_key);
                             const out_data = outp.buf.data();
-                            cb.pathSend(cb.ctx, self.path, cb.tptr, out_data.ptr, @intCast(out_data.len), cb.now(cb.ctx));
+                            cb.path.pathSend(cb.ctx, self.path, cb.tptr, out_data.ptr, @intCast(out_data.len), cb.now(cb.ctx));
                         } else {
                             cb.traceIncomingPacketMacFailure(
                                 cb.ctx,
@@ -1269,8 +1218,8 @@ pub const IncomingPacket = struct {
                 } else {
                     // Same identity — check packet integrity.
                     if (!self.pkt.dearmor(
-                        cb.peerKey(cb.ctx, peer),
-                        cb.peerAesKeysIfSupported(cb.ctx, peer),
+                        cb.peer.peerKey(cb.ctx, peer),
+                        cb.peer.peerAesKeysIfSupported(cb.ctx, peer),
                         &cb.local_identity._private_key,
                     )) {
                         cb.traceIncomingPacketMacFailure(
@@ -1304,7 +1253,7 @@ pub const IncomingPacket = struct {
             if (!cb.nodeRateGateIdentityVerification(
                 cb.ctx,
                 now,
-                cb.pathAddress(cb.ctx, self.path),
+                cb.path.pathAddress(cb.ctx, self.path),
             )) {
                 cb.traceIncomingPacketDroppedHELLO(
                     cb.ctx,
@@ -1321,7 +1270,7 @@ pub const IncomingPacket = struct {
             // temporary peer to get the key, or we compute it here.
             // For now, we add the peer first (which computes the key),
             // then verify.
-            peer = cb.topologyAddPeer(cb.ctx, cb.tptr, &id);
+            peer = cb.topology.topologyAddPeer(cb.ctx, cb.tptr, &id);
             if (peer == null) {
                 cb.traceIncomingPacketDroppedHELLO(
                     cb.ctx,
@@ -1335,8 +1284,8 @@ pub const IncomingPacket = struct {
             }
 
             if (!self.pkt.dearmor(
-                cb.peerKey(cb.ctx, peer),
-                cb.peerAesKeysIfSupported(cb.ctx, peer),
+                cb.peer.peerKey(cb.ctx, peer),
+                cb.peer.peerAesKeysIfSupported(cb.ctx, peer),
                 &cb.local_identity._private_key,
             )) {
                 cb.traceIncomingPacketMacFailure(
@@ -1370,10 +1319,10 @@ pub const IncomingPacket = struct {
                     cb.ctx,
                     cb.tptr,
                     from_addr_int,
-                    cb.pathLocalSocket(cb.ctx, self.path),
-                    cb.pathAddress(cb.ctx, self.path),
+                    cb.path.pathLocalSocket(cb.ctx, self.path),
+                    cb.path.pathAddress(cb.ctx, self.path),
                     &external_surface_address,
-                    cb.topologyIsUpstream(cb.ctx, &id),
+                    cb.topology.topologyIsUpstream(cb.ctx, &id),
                     now,
                 );
             }
@@ -1397,7 +1346,7 @@ pub const IncomingPacket = struct {
 
         if (ptr < pkt_size) {
             // Decrypt remaining payload.
-            self.pkt.cryptField(cb.peerKey(cb.ctx, peer), ptr, pkt_size - ptr);
+            self.pkt.cryptField(cb.peer.peerKey(cb.ctx, peer), ptr, pkt_size - ptr);
 
             if ((ptr + 2) <= pkt_size) {
                 const num_moons = self.pkt.buf.at(u16, ptr) catch 0;
@@ -1428,7 +1377,7 @@ pub const IncomingPacket = struct {
         outp.buf.appendInt(u16, version_revision) catch return true;
 
         // Serialize our path address into the response.
-        const path_addr = cb.pathAddress(cb.ctx, self.path);
+        const path_addr = cb.path.pathAddress(cb.ctx, self.path);
         path_addr.serialize(packet.max_packet_length, &outp.buf) catch return true;
 
         // Reserve space for world update size field.
@@ -1438,14 +1387,14 @@ pub const IncomingPacket = struct {
         // Append planet update if ours is newer.
         var world_bytes_written: u32 = 0;
         if (planet_world_id != 0 and
-            cb.topologyPlanetWorldTimestamp(cb.ctx) > planet_world_timestamp and
-            planet_world_id == cb.topologyPlanetWorldId(cb.ctx))
+            cb.topology.topologyPlanetWorldTimestamp(cb.ctx) > planet_world_timestamp and
+            planet_world_id == cb.topology.topologyPlanetWorldId(cb.ctx))
         {
             // Serialize planet directly into outp buffer.
             const avail = packet.max_packet_length - outp.buf.size();
             if (avail > 0) {
                 var tmp_buf: [1024]u8 = undefined;
-                const planet_len = cb.topologySerializePlanet(cb.ctx, &tmp_buf, @intCast(tmp_buf.len));
+                const planet_len = cb.topology.topologySerializePlanet(cb.ctx, &tmp_buf, @intCast(tmp_buf.len));
                 if (planet_len > 0 and planet_len <= avail) {
                     outp.buf.appendBytes(tmp_buf[0..planet_len]) catch |err| {
                         std.log.warn("Failed to append planet data to HELLO OK: {}", .{err});
@@ -1458,7 +1407,7 @@ pub const IncomingPacket = struct {
         // Append moon updates if any are newer.
         if (moon_count > 0) {
             var tmp_buf: [2048]u8 = undefined;
-            const moon_len = cb.topologySerializeUpdatedMoons(
+            const moon_len = cb.topology.topologySerializeUpdatedMoons(
                 cb.ctx,
                 &moon_ids,
                 &moon_timestamps,
@@ -1480,11 +1429,11 @@ pub const IncomingPacket = struct {
         };
 
         // Armor and send.
-        const peer_key = cb.peerKey(cb.ctx, peer);
-        const peer_aes = cb.peerAesKeysIfSupported(cb.ctx, peer);
-        const peer_pub = cb.peerPublicKey(cb.ctx, peer);
+        const peer_key = cb.peer.peerKey(cb.ctx, peer);
+        const peer_aes = cb.peer.peerAesKeysIfSupported(cb.ctx, peer);
+        const peer_pub = cb.peer.peerPublicKey(cb.ctx, peer);
         outp.armor(peer_key, true, false, peer_aes, peer_pub);
-        cb.peerRecordOutgoingPacket(
+        cb.peer.peerRecordOutgoingPacket(
             cb.ctx,
             peer,
             self.path,
@@ -1495,11 +1444,11 @@ pub const IncomingPacket = struct {
             now,
         );
         const out_data = outp.buf.data();
-        cb.pathSend(cb.ctx, self.path, cb.tptr, out_data.ptr, @intCast(out_data.len), now);
+        cb.path.pathSend(cb.ctx, self.path, cb.tptr, out_data.ptr, @intCast(out_data.len), now);
 
         // Update peer version and notify received.
-        cb.peerSetRemoteVersion(cb.ctx, peer, proto_version, v_major, v_minor, v_revision);
-        cb.peerReceived(
+        cb.peer.peerSetRemoteVersion(cb.ctx, peer, proto_version, v_major, v_minor, v_revision);
+        cb.peer.peerReceived(
             cb.ctx,
             cb.tptr,
             peer,
@@ -1523,13 +1472,13 @@ pub const IncomingPacket = struct {
     /// Handles: OBJ_NOT_FOUND, UNSUPPORTED_OPERATION, IDENTITY_COLLISION,
     /// NEED_MEMBERSHIP_CERTIFICATE, NETWORK_ACCESS_DENIED,
     /// UNWANTED_MULTICAST, NETWORK_AUTHENTICATION_REQUIRED.
-    fn doERROR(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doERROR(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         const in_re_verb_raw = self.pkt.buf.at(u8, packet.error_idx.idx_in_re_verb) catch return true;
         const in_re_packet_id = self.pkt.buf.at(u64, packet.error_idx.idx_in_re_packet_id) catch return true;
         const error_code_raw = self.pkt.buf.at(u8, packet.error_idx.idx_error_code) catch return true;
         var network_id: u64 = 0;
 
-        const peer_addr = cb.peerAddress(cb.ctx, peer);
+        const peer_addr = cb.peer.peerAddress(cb.ctx, peer);
 
         // Dispatch on error code. Each case validates its own trust
         // conditions rather than using a blanket expectingReplyTo gate.
@@ -1542,10 +1491,10 @@ pub const IncomingPacket = struct {
                         self.doERROR_finish(cb, peer, in_re_packet_id, in_re_verb_raw, network_id);
                         return true;
                     };
-                    const nw = cb.nodeGetNetwork(cb.ctx, nwid);
+                    const nw = cb.network.nodeGetNetwork(cb.ctx, nwid);
                     if (nw) |n| {
-                        if (cb.networkController(cb.ctx, n) == peer_addr) {
-                            cb.networkSetNotFound(cb.ctx, cb.tptr, n);
+                        if (cb.network.networkController(cb.ctx, n) == peer_addr) {
+                            cb.network.networkSetNotFound(cb.ctx, cb.tptr, n);
                         }
                     }
                 }
@@ -1557,18 +1506,18 @@ pub const IncomingPacket = struct {
                         self.doERROR_finish(cb, peer, in_re_packet_id, in_re_verb_raw, network_id);
                         return true;
                     };
-                    const nw = cb.nodeGetNetwork(cb.ctx, nwid);
+                    const nw = cb.network.nodeGetNetwork(cb.ctx, nwid);
                     if (nw) |n| {
-                        if (cb.networkController(cb.ctx, n) == peer_addr) {
-                            cb.networkSetNotFound(cb.ctx, cb.tptr, n);
+                        if (cb.network.networkController(cb.ctx, n) == peer_addr) {
+                            cb.network.networkSetNotFound(cb.ctx, cb.tptr, n);
                         }
                     }
                 }
             },
             .identity_collision => {
                 // Only act on this if from an upstream (root) node.
-                const peer_id = cb.peerIdentity(cb.ctx, peer);
-                if (cb.topologyIsUpstream(cb.ctx, peer_id)) {
+                const peer_id = cb.peer.peerIdentity(cb.ctx, peer);
+                if (cb.topology.topologyIsUpstream(cb.ctx, peer_id)) {
                     cb.nodePostEvent(
                         cb.ctx,
                         cb.tptr,
@@ -1582,10 +1531,10 @@ pub const IncomingPacket = struct {
                     self.doERROR_finish(cb, peer, in_re_packet_id, in_re_verb_raw, network_id);
                     return true;
                 };
-                const nw = cb.nodeGetNetwork(cb.ctx, network_id);
+                const nw = cb.network.nodeGetNetwork(cb.ctx, network_id);
                 if (nw) |n| {
-                    if (cb.networkConfigHasCom(cb.ctx, n)) {
-                        cb.networkPeerRequestedCredentials(
+                    if (cb.network.networkConfigHasCom(cb.ctx, n)) {
+                        cb.network.networkPeerRequestedCredentials(
                             cb.ctx,
                             cb.tptr,
                             n,
@@ -1600,10 +1549,10 @@ pub const IncomingPacket = struct {
                     self.doERROR_finish(cb, peer, in_re_packet_id, in_re_verb_raw, network_id);
                     return true;
                 };
-                const nw = cb.nodeGetNetwork(cb.ctx, nwid);
+                const nw = cb.network.nodeGetNetwork(cb.ctx, nwid);
                 if (nw) |n| {
-                    if (cb.networkController(cb.ctx, n) == peer_addr) {
-                        cb.networkSetAccessDenied(cb.ctx, cb.tptr, n);
+                    if (cb.network.networkController(cb.ctx, n) == peer_addr) {
+                        cb.network.networkSetAccessDenied(cb.ctx, cb.tptr, n);
                     }
                 }
             },
@@ -1612,9 +1561,9 @@ pub const IncomingPacket = struct {
                     self.doERROR_finish(cb, peer, in_re_packet_id, in_re_verb_raw, network_id);
                     return true;
                 };
-                const nw = cb.nodeGetNetwork(cb.ctx, network_id);
+                const nw = cb.network.nodeGetNetwork(cb.ctx, network_id);
                 if (nw) |n| {
-                    if (cb.networkGate(cb.ctx, cb.tptr, n, peer)) {
+                    if (cb.network.networkGate(cb.ctx, cb.tptr, n, peer)) {
                         // Extract MAC (6 bytes) and ADI (4 bytes).
                         const mac_offset = packet.error_idx.idx_error_payload + 8;
                         const mac_data = self.pkt.buf.field(mac_offset, 6) catch {
@@ -1625,7 +1574,7 @@ pub const IncomingPacket = struct {
                             self.doERROR_finish(cb, peer, in_re_packet_id, in_re_verb_raw, network_id);
                             return true;
                         };
-                        cb.multicasterRemove(
+                        cb.multicast.multicasterRemove(
                             cb.ctx,
                             network_id,
                             mac_data[0..6],
@@ -1649,12 +1598,12 @@ pub const IncomingPacket = struct {
     fn doERROR_finish(
         self: *Self,
         cb: *const Callbacks,
-        peer: ?*anyopaque,
+        peer: ?*Peer,
         in_re_packet_id: u64,
         in_re_verb_raw: u32,
         network_id: u64,
     ) void {
-        cb.peerReceived(
+        cb.peer.peerReceived(
             cb.ctx,
             cb.tptr,
             peer,
@@ -1680,8 +1629,8 @@ pub const IncomingPacket = struct {
     /// behavior while avoiding a full Dictionary parser dependency.
     fn handleAuthRequired(self: *Self, cb: *const Callbacks, peer_addr: u64) void {
         const nwid = self.pkt.buf.at(u64, packet.error_idx.idx_error_payload) catch return;
-        const nw = cb.nodeGetNetwork(cb.ctx, nwid) orelse return;
-        if (cb.networkController(cb.ctx, nw) != peer_addr) return;
+        const nw = cb.network.nodeGetNetwork(cb.ctx, nwid) orelse return;
+        if (cb.network.networkController(cb.ctx, nw) != peer_addr) return;
 
         const pkt_size = self.pkt.buf.size();
         const data_start = packet.error_idx.idx_error_payload + 8;
@@ -1689,19 +1638,19 @@ pub const IncomingPacket = struct {
         // Check if there's extra data beyond the network ID.
         if (pkt_size <= data_start + 2) {
             // No auth data — set empty URL.
-            cb.networkSetAuthenticationRequired(cb.ctx, cb.tptr, nw, "");
+            cb.network.networkSetAuthenticationRequired(cb.ctx, cb.tptr, nw, "");
             return;
         }
 
         const error_data_size = self.pkt.buf.at(u16, data_start) catch {
-            cb.networkSetAuthenticationRequired(cb.ctx, cb.tptr, nw, "");
+            cb.network.networkSetAuthenticationRequired(cb.ctx, cb.tptr, nw, "");
             return;
         };
 
         // Remaining data after the 2-byte size field.
         const remaining = pkt_size - (data_start + 2);
         if (remaining < error_data_size) {
-            cb.networkSetAuthenticationRequired(cb.ctx, cb.tptr, nw, "");
+            cb.network.networkSetAuthenticationRequired(cb.ctx, cb.tptr, nw, "");
             return;
         }
 
@@ -1710,7 +1659,7 @@ pub const IncomingPacket = struct {
         // pulling in the full Dictionary module for a single use case.
         const dict_start = data_start + 2;
         const dict_data = self.pkt.buf.field(dict_start, error_data_size) catch {
-            cb.networkSetAuthenticationRequired(cb.ctx, cb.tptr, nw, "");
+            cb.network.networkSetAuthenticationRequired(cb.ctx, cb.tptr, nw, "");
             return;
         };
 
@@ -1720,14 +1669,14 @@ pub const IncomingPacket = struct {
         if (url_len > 0) {
             // Ensure null-terminated.
             auth_url_buf[@min(url_len, auth_url_buf.len - 1)] = 0;
-            cb.networkSetAuthenticationRequired(
+            cb.network.networkSetAuthenticationRequired(
                 cb.ctx,
                 cb.tptr,
                 nw,
                 @ptrCast(&auth_url_buf),
             );
         } else {
-            cb.networkSetAuthenticationRequired(cb.ctx, cb.tptr, nw, "");
+            cb.network.networkSetAuthenticationRequired(cb.ctx, cb.tptr, nw, "");
         }
     }
 
@@ -1735,13 +1684,13 @@ pub const IncomingPacket = struct {
     ///
     /// Handles: OK(HELLO), OK(WHOIS), OK(NETWORK_CONFIG_REQUEST),
     /// OK(MULTICAST_GATHER), OK(MULTICAST_FRAME).
-    fn doOK(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doOK(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         const in_re_verb_raw = self.pkt.buf.at(u8, packet.ok_idx.idx_in_re_verb) catch return true;
         const in_re_packet_id = self.pkt.buf.at(u64, packet.ok_idx.idx_in_re_packet_id) catch return true;
         var network_id: u64 = 0;
 
         // Only process OKs we were expecting.
-        if (!cb.nodeExpectingReplyTo(cb.ctx, in_re_packet_id)) {
+        if (!cb.network.nodeExpectingReplyTo(cb.ctx, in_re_packet_id)) {
             return true;
         }
 
@@ -1757,7 +1706,7 @@ pub const IncomingPacket = struct {
             network_id = self.doOK_MULTICAST_FRAME(cb, peer);
         }
 
-        cb.peerReceived(
+        cb.peer.peerReceived(
             cb.ctx,
             cb.tptr,
             peer,
@@ -1778,7 +1727,7 @@ pub const IncomingPacket = struct {
 
     /// OK(HELLO) sub-handler: process version info, surface address,
     /// world updates, and latency measurement.
-    fn doOK_HELLO(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) void {
+    fn doOK_HELLO(self: *Self, cb: *const Callbacks, peer: ?*Peer) void {
         const now = cb.now(cb.ctx);
         const timestamp = self.pkt.buf.at(i64, packet.hello_ok_idx.idx_timestamp) catch return;
         const latency_raw = now - timestamp;
@@ -1809,15 +1758,15 @@ pub const IncomingPacket = struct {
         if (ptr + 2 <= pkt_size) {
             const worlds_len = self.pkt.buf.at(u16, ptr) catch 0;
             ptr += 2;
-            const peer_addr = cb.peerAddress(cb.ctx, peer);
-            if (cb.topologyShouldAcceptWorldUpdateFrom(cb.ctx, peer_addr)) {
+            const peer_addr = cb.peer.peerAddress(cb.ctx, peer);
+            if (cb.topology.topologyShouldAcceptWorldUpdateFrom(cb.ctx, peer_addr)) {
                 const end_of_worlds = ptr + worlds_len;
                 while (ptr < end_of_worlds and ptr < pkt_size) {
                     // Each world is self-delimiting via its deserialize.
                     // Pass the raw bytes to the runtime for deserialization.
                     const world_data_len = end_of_worlds - ptr;
                     const world_data = self.pkt.buf.field(ptr, world_data_len) catch break;
-                    if (cb.topologyAddWorld(
+                    if (cb.topology.topologyAddWorld(
                         cb.ctx,
                         cb.tptr,
                         world_data.ptr,
@@ -1850,31 +1799,31 @@ pub const IncomingPacket = struct {
 
         // Update latency on direct paths.
         if (self.pkt.hops() == 0) {
-            cb.pathUpdateLatency(cb.ctx, self.path, latency, now);
+            cb.path.pathUpdateLatency(cb.ctx, self.path, latency, now);
         }
 
-        cb.peerSetRemoteVersion(cb.ctx, peer, v_proto, v_major, v_minor, v_rev);
+        cb.peer.peerSetRemoteVersion(cb.ctx, peer, v_proto, v_major, v_minor, v_rev);
 
         // Report externally-observed surface address.
         if (ext_surface.isSet() and self.pkt.hops() == 0) {
-            const peer_id = cb.peerIdentity(cb.ctx, peer);
+            const peer_id = cb.peer.peerIdentity(cb.ctx, peer);
             cb.selfAwarenessIam(
                 cb.ctx,
                 cb.tptr,
-                cb.peerAddress(cb.ctx, peer),
-                cb.pathLocalSocket(cb.ctx, self.path),
-                cb.pathAddress(cb.ctx, self.path),
+                cb.peer.peerAddress(cb.ctx, peer),
+                cb.path.pathLocalSocket(cb.ctx, self.path),
+                cb.path.pathAddress(cb.ctx, self.path),
                 &ext_surface,
-                cb.topologyIsUpstream(cb.ctx, peer_id),
+                cb.topology.topologyIsUpstream(cb.ctx, peer_id),
                 now,
             );
         }
     }
 
     /// OK(WHOIS) sub-handler: learn a new peer identity from an upstream.
-    fn doOK_WHOIS(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) void {
-        const peer_id = cb.peerIdentity(cb.ctx, peer);
-        if (!cb.topologyIsUpstream(cb.ctx, peer_id)) return;
+    fn doOK_WHOIS(self: *Self, cb: *const Callbacks, peer: ?*Peer) void {
+        const peer_id = cb.peer.peerIdentity(cb.ctx, peer);
+        if (!cb.topology.topologyIsUpstream(cb.ctx, peer_id)) return;
 
         const id_result = Identity.deserialize(
             packet.max_packet_length,
@@ -1882,15 +1831,15 @@ pub const IncomingPacket = struct {
             packet.whois_ok_idx.idx_identity,
         ) orelse return;
 
-        const new_peer = cb.topologyAddPeer(cb.ctx, cb.tptr, &id_result.identity) orelse return;
-        cb.switchDoAnythingWaitingForPeer(cb.ctx, cb.tptr, new_peer);
+        const new_peer = cb.topology.topologyAddPeer(cb.ctx, cb.tptr, &id_result.identity) orelse return;
+        cb.sw.switchDoAnythingWaitingForPeer(cb.ctx, cb.tptr, new_peer);
     }
 
     /// OK(NETWORK_CONFIG_REQUEST) sub-handler: pass config chunk to
     /// the network. Returns the network ID.
     fn doOK_NETWORK_CONFIG_REQUEST(self: *Self, cb: *const Callbacks, _: ?*anyopaque) u64 {
         const nwid = self.pkt.buf.at(u64, packet.ok_idx.idx_ok_payload) catch return 0;
-        const nw = cb.nodeGetNetwork(cb.ctx, nwid) orelse return nwid;
+        const nw = cb.network.nodeGetNetwork(cb.ctx, nwid) orelse return nwid;
 
         // Validate packet is large enough to have payload (prevent integer underflow)
         if (self.pkt.buf.size() < packet.ok_idx.idx_ok_payload) return nwid;
@@ -1899,7 +1848,7 @@ pub const IncomingPacket = struct {
         // network's config chunk handler.
         const payload_len = self.pkt.buf.size() - packet.ok_idx.idx_ok_payload;
         const payload = self.pkt.buf.field(packet.ok_idx.idx_ok_payload, payload_len) catch return nwid;
-        cb.networkHandleConfigChunk(
+        cb.network.networkHandleConfigChunk(
             cb.ctx,
             cb.tptr,
             nw,
@@ -1916,7 +1865,7 @@ pub const IncomingPacket = struct {
     /// Returns the network ID.
     fn doOK_MULTICAST_GATHER(self: *Self, cb: *const Callbacks, _: ?*anyopaque) u64 {
         const nwid = self.pkt.buf.at(u64, packet.multicast_gather_ok_idx.idx_network_id) catch return 0;
-        const nw = cb.nodeGetNetwork(cb.ctx, nwid);
+        const nw = cb.network.nodeGetNetwork(cb.ctx, nwid);
         if (nw == null) return nwid;
 
         const mac_data = self.pkt.buf.field(packet.multicast_gather_ok_idx.idx_mac, 6) catch return nwid;
@@ -1929,7 +1878,7 @@ pub const IncomingPacket = struct {
         if (count > 2000) return nwid; // Prevent u32 overflow (2000*5=10000 < max_packet_length)
         const addresses_data = self.pkt.buf.field(gather_off + 6, @as(u32, count) * 5) catch return nwid;
 
-        cb.multicasterAddMultiple(
+        cb.multicast.multicasterAddMultiple(
             cb.ctx,
             cb.tptr,
             cb.now(cb.ctx),
@@ -1947,7 +1896,7 @@ pub const IncomingPacket = struct {
     /// results. Returns the network ID.
     fn doOK_MULTICAST_FRAME(self: *Self, cb: *const Callbacks, _: ?*anyopaque) u64 {
         const nwid = self.pkt.buf.at(u64, packet.multicast_frame_ok_idx.idx_network_id) catch return 0;
-        const nw = cb.nodeGetNetwork(cb.ctx, nwid);
+        const nw = cb.network.nodeGetNetwork(cb.ctx, nwid);
         if (nw == null) return nwid;
 
         const flags = self.pkt.buf.at(u8, packet.multicast_frame_ok_idx.idx_flags) catch return nwid;
@@ -1971,7 +1920,7 @@ pub const IncomingPacket = struct {
             const addresses_data = self.pkt.buf.field(offset, @as(u32, count) * 5) catch return nwid;
             const mac_data = self.pkt.buf.field(packet.multicast_frame_ok_idx.idx_mac, 6) catch return nwid;
             const adi = self.pkt.buf.at(u32, packet.multicast_frame_ok_idx.idx_adi) catch return nwid;
-            cb.multicasterAddMultiple(
+            cb.multicast.multicasterAddMultiple(
                 cb.ctx,
                 cb.tptr,
                 cb.now(cb.ctx),
@@ -1992,18 +1941,18 @@ pub const IncomingPacket = struct {
     /// Non-upstream nodes rate-limit WHOIS requests. For each address in
     /// the request, if we know the identity we serialize it into an OK
     /// response; otherwise we request it from our upstream.
-    fn doWHOIS(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doWHOIS(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         const now = cb.now(cb.ctx);
 
         // Non-upstream nodes rate-gate WHOIS.
-        if (!cb.topologyAmUpstream(cb.ctx) and
-            !cb.peerRateGateInboundWhoisRequest(cb.ctx, peer, now))
+        if (!cb.topology.topologyAmUpstream(cb.ctx) and
+            !cb.peer.peerRateGateInboundWhoisRequest(cb.ctx, peer, now))
         {
             return true;
         }
 
         // Start building OK(WHOIS) response.
-        const peer_addr = Address.init(cb.peerAddress(cb.ctx, peer));
+        const peer_addr = Address.init(cb.peer.peerAddress(cb.ctx, peer));
         var outp = Packet.initNew(peer_addr, cb.local_identity.address(), .ok);
         outp.buf.appendByte(@intFromEnum(Verb.whois), 1) catch return true;
         outp.buf.appendInt(u64, self.pkt.packetId()) catch return true;
@@ -2028,7 +1977,7 @@ pub const IncomingPacket = struct {
             ptr += constants.address_length;
 
             // Look up the identity.
-            if (cb.topologyGetIdentity(cb.ctx, cb.tptr, addr.toInt())) |id| {
+            if (cb.topology.topologyGetIdentity(cb.ctx, cb.tptr, addr.toInt())) |id| {
                 // Serialize this identity into the OK response.
                 id.serialize(packet.max_packet_length, &outp.buf, false) catch {
                     break; // Buffer full — send what we have
@@ -2036,20 +1985,20 @@ pub const IncomingPacket = struct {
                 count += 1;
             } else {
                 // Request it from our upstream.
-                cb.switchRequestWhois(cb.ctx, cb.tptr, now, addr.toInt());
+                cb.sw.switchRequestWhois(cb.ctx, cb.tptr, now, addr.toInt());
             }
         }
 
         // Send OK(WHOIS) only if we found at least one identity.
         if (count > 0) {
-            const peer_key = cb.peerKey(cb.ctx, peer);
-            const peer_aes = cb.peerAesKeysIfSupported(cb.ctx, peer);
+            const peer_key = cb.peer.peerKey(cb.ctx, peer);
+            const peer_aes = cb.peer.peerAesKeysIfSupported(cb.ctx, peer);
             outp.armor(peer_key, true, false, peer_aes, &cb.local_identity._public_key);
             const out_data = outp.buf.data();
-            cb.pathSend(cb.ctx, self.path, cb.tptr, out_data.ptr, @intCast(out_data.len), now);
+            cb.path.pathSend(cb.ctx, self.path, cb.tptr, out_data.ptr, @intCast(out_data.len), now);
         }
 
-        cb.peerReceived(
+        cb.peer.peerReceived(
             cb.ctx,
             cb.tptr,
             peer,
@@ -2073,12 +2022,12 @@ pub const IncomingPacket = struct {
     /// Only upstream nodes send RENDEZVOUS. This tells us to attempt
     /// to contact another peer at a specific address (sending a junk
     /// packet first to punch through NAT/firewall).
-    fn doRENDEZVOUS(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doRENDEZVOUS(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         const now = cb.now(cb.ctx);
-        const peer_id = cb.peerIdentity(cb.ctx, peer);
+        const peer_id = cb.peer.peerIdentity(cb.ctx, peer);
 
         // Only honor RENDEZVOUS from upstream nodes.
-        if (cb.topologyIsUpstream(cb.ctx, peer_id)) {
+        if (cb.topology.topologyIsUpstream(cb.ctx, peer_id)) {
             // Parse the ZT address to contact.
             var with_bytes: [constants.address_length]u8 = undefined;
             var i: u32 = 0;
@@ -2118,7 +2067,7 @@ pub const IncomingPacket = struct {
                         return true;
                     }
 
-                    const local_socket = cb.pathLocalSocket(cb.ctx, self.path);
+                    const local_socket = cb.path.pathLocalSocket(cb.ctx, self.path);
 
                     // Check if we should use this path.
                     if (cb.nodeShouldUsePathForZeroTierTraffic(
@@ -2142,7 +2091,7 @@ pub const IncomingPacket = struct {
                         );
 
                         // Attempt to contact the peer.
-                        cb.peerAttemptToContactAt(
+                        cb.peer.peerAttemptToContactAt(
                             cb.ctx,
                             cb.tptr,
                             rendezvous_peer,
@@ -2156,7 +2105,7 @@ pub const IncomingPacket = struct {
             }
         }
 
-        cb.peerReceived(
+        cb.peer.peerReceived(
             cb.ctx,
             cb.tptr,
             peer,
@@ -2180,12 +2129,12 @@ pub const IncomingPacket = struct {
     /// Extracts network ID and ethertype, computes flow ID for QoS if
     /// supported, validates network membership, filters via rules, and
     /// delivers the frame to userspace if accepted.
-    fn doFRAME(self: *Self, cb: *const Callbacks, peer: ?*anyopaque, flow_id: i32) bool {
+    fn doFRAME(self: *Self, cb: *const Callbacks, peer: ?*Peer, flow_id: i32) bool {
         _ = flow_id;
         var computed_flow_id: i32 = qos_no_flow;
 
         // Compute flow ID for QoS if peer supports it.
-        if (cb.peerFlowHashingSupported(cb.ctx, peer)) {
+        if (cb.peer.peerFlowHashingSupported(cb.ctx, peer)) {
             const pkt_size = self.pkt.buf.size();
             if (pkt_size > packet.frame_idx.idx_frame_payload) {
                 const ethertype = self.pkt.buf.at(u16, packet.frame_idx.idx_ethertype) catch ethertype_ipv4;
@@ -2197,26 +2146,26 @@ pub const IncomingPacket = struct {
         }
 
         const nwid = self.pkt.buf.at(u64, packet.frame_idx.idx_network_id) catch return true;
-        const nw = cb.nodeGetNetwork(cb.ctx, nwid);
+        const nw = cb.network.nodeGetNetwork(cb.ctx, nwid);
         var trust_established = false;
 
         if (nw) |network| {
-            if (cb.networkGate(cb.ctx, cb.tptr, network, peer)) {
+            if (cb.network.networkGate(cb.ctx, cb.tptr, network, peer)) {
                 trust_established = true;
 
                 const pkt_size = self.pkt.buf.size();
                 if (pkt_size > packet.frame_idx.idx_frame_payload) {
                     const ethertype = self.pkt.buf.at(u16, packet.frame_idx.idx_ethertype) catch return true;
                     const source_mac = MAC.fromAddress(
-                        Address.init(cb.peerAddress(cb.ctx, peer)),
+                        Address.init(cb.peer.peerAddress(cb.ctx, peer)),
                         nwid,
                     );
-                    const dest_mac = cb.networkMac(cb.ctx, network);
+                    const dest_mac = cb.network.networkMac(cb.ctx, network);
                     if (pkt_size <= packet.frame_idx.idx_frame_payload) return true; // malformed
                     const frame_len = pkt_size - packet.frame_idx.idx_frame_payload;
                     const frame_data = self.pkt.buf.data()[packet.frame_idx.idx_frame_payload..];
 
-                    if (cb.networkFilterIncomingPacket(
+                    if (cb.network.networkFilterIncomingPacket(
                         cb.ctx,
                         cb.tptr,
                         network,
@@ -2233,7 +2182,7 @@ pub const IncomingPacket = struct {
                             cb.ctx,
                             cb.tptr,
                             nwid,
-                            cb.networkUserPtr(cb.ctx, network),
+                            cb.network.networkUserPtr(cb.ctx, network),
                             &source_mac,
                             &dest_mac,
                             ethertype,
@@ -2250,7 +2199,7 @@ pub const IncomingPacket = struct {
             }
         }
 
-        cb.peerReceived(
+        cb.peer.peerReceived(
             cb.ctx,
             cb.tptr,
             peer,
@@ -2274,12 +2223,12 @@ pub const IncomingPacket = struct {
     /// Similar to FRAME but includes source and destination MAC addresses,
     /// enabling bridging and multicast. May include an inline COM for
     /// backwards compatibility.
-    fn doEXT_FRAME(self: *Self, cb: *const Callbacks, peer: ?*anyopaque, flow_id: i32) bool {
+    fn doEXT_FRAME(self: *Self, cb: *const Callbacks, peer: ?*Peer, flow_id: i32) bool {
         _ = flow_id;
         var computed_flow_id: i32 = qos_no_flow;
 
         // Compute flow ID for QoS if peer supports it.
-        if (cb.peerFlowHashingSupported(cb.ctx, peer)) {
+        if (cb.peer.peerFlowHashingSupported(cb.ctx, peer)) {
             const pkt_size = self.pkt.buf.size();
             if (pkt_size > packet.ext_frame_idx.idx_frame_payload) {
                 const flags = self.pkt.buf.at(u8, packet.ext_frame_idx.idx_flags) catch 0;
@@ -2301,7 +2250,7 @@ pub const IncomingPacket = struct {
         }
 
         const nwid = self.pkt.buf.at(u64, packet.ext_frame_idx.idx_network_id) catch return true;
-        const nw = cb.nodeGetNetwork(cb.ctx, nwid);
+        const nw = cb.network.nodeGetNetwork(cb.ctx, nwid);
 
         if (nw) |network| {
             const flags = self.pkt.buf.at(u8, packet.ext_frame_idx.idx_flags) catch 0;
@@ -2310,7 +2259,7 @@ pub const IncomingPacket = struct {
             // Handle inline COM if present (deprecated).
             // Modern peers don't use inline COM (flag 0x01), so we simplify.
 
-            if (!cb.networkGate(cb.ctx, cb.tptr, network, peer)) {
+            if (!cb.network.networkGate(cb.ctx, cb.tptr, network, peer)) {
                 self.sendErrorNeedCredentials(cb, peer, nwid);
                 return false;
             }
@@ -2334,9 +2283,9 @@ pub const IncomingPacket = struct {
                 const from_mac = MAC.fromBytes(&from_bytes);
 
                 // Check for invalid source MAC.
-                const network_mac = cb.networkMac(cb.ctx, network);
+                const network_mac = cb.network.networkMac(cb.ctx, network);
                 if (!from_mac.isSet() or from_mac.eql(network_mac)) {
-                    cb.peerReceived(
+                    cb.peer.peerReceived(
                         cb.ctx,
                         cb.tptr,
                         peer,
@@ -2358,7 +2307,7 @@ pub const IncomingPacket = struct {
                 const frame_data = self.pkt.buf.data()[frame_payload_idx..];
 
                 // Filter and deliver frame.
-                if (cb.networkFilterIncomingPacket(
+                if (cb.network.networkFilterIncomingPacket(
                     cb.ctx,
                     cb.tptr,
                     network,
@@ -2375,7 +2324,7 @@ pub const IncomingPacket = struct {
                         cb.ctx,
                         cb.tptr,
                         nwid,
-                        cb.networkUserPtr(cb.ctx, network),
+                        cb.network.networkUserPtr(cb.ctx, network),
                         &from_mac,
                         &to_mac,
                         ethertype,
@@ -2389,18 +2338,18 @@ pub const IncomingPacket = struct {
 
             // Send ACK if requested.
             if ((flags & 0x10) != 0) {
-                const peer_addr = Address.init(cb.peerAddress(cb.ctx, peer));
+                const peer_addr = Address.init(cb.peer.peerAddress(cb.ctx, peer));
                 var outp = Packet.initNew(peer_addr, cb.local_identity.address(), .ok);
                 outp.buf.appendByte(@intFromEnum(Verb.ext_frame), 1) catch return true;
                 outp.buf.appendInt(u64, self.pkt.packetId()) catch return true;
                 outp.buf.appendInt(u64, nwid) catch return true;
 
                 const now = cb.now(cb.ctx);
-                const peer_key = cb.peerKey(cb.ctx, peer);
-                const peer_aes = cb.peerAesKeysIfSupported(cb.ctx, peer);
-                const peer_pub = cb.peerPublicKey(cb.ctx, peer);
+                const peer_key = cb.peer.peerKey(cb.ctx, peer);
+                const peer_aes = cb.peer.peerAesKeysIfSupported(cb.ctx, peer);
+                const peer_pub = cb.peer.peerPublicKey(cb.ctx, peer);
                 outp.armor(peer_key, true, false, peer_aes, peer_pub);
-                cb.peerRecordOutgoingPacket(
+                cb.peer.peerRecordOutgoingPacket(
                     cb.ctx,
                     peer,
                     self.path,
@@ -2411,10 +2360,10 @@ pub const IncomingPacket = struct {
                     now,
                 );
                 const out_data = outp.buf.data();
-                cb.pathSend(cb.ctx, self.path, cb.tptr, out_data.ptr, @intCast(out_data.len), now);
+                cb.path.pathSend(cb.ctx, self.path, cb.tptr, out_data.ptr, @intCast(out_data.len), now);
             }
 
-            cb.peerReceived(
+            cb.peer.peerReceived(
                 cb.ctx,
                 cb.tptr,
                 peer,
@@ -2430,7 +2379,7 @@ pub const IncomingPacket = struct {
                 computed_flow_id,
             );
         } else {
-            cb.peerReceived(
+            cb.peer.peerReceived(
                 cb.ctx,
                 cb.tptr,
                 peer,
@@ -2454,7 +2403,7 @@ pub const IncomingPacket = struct {
     ///
     /// Packet contains a series of 18-byte (nwid, MAC, ADI) tuples.
     /// Peer must be authorized on each network.
-    fn doMULTICAST_LIKE(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doMULTICAST_LIKE(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         const now = cb.now(cb.ctx);
         const pkt_size = self.pkt.buf.size();
         var ptr: u32 = packet.idx_payload;
@@ -2470,33 +2419,33 @@ pub const IncomingPacket = struct {
             const adi = self.pkt.buf.at(u32, ptr + 14) catch break;
 
             const mg = MulticastGroup.init(MAC.fromBytes(&mac_bytes), adi);
-            const nw = cb.nodeGetNetwork(cb.ctx, nwid);
+            const nw = cb.network.nodeGetNetwork(cb.ctx, nwid);
             var authorized = false;
 
             if (nw) |network| {
-                authorized = cb.networkGate(cb.ctx, cb.tptr, network, peer);
+                authorized = cb.network.networkGate(cb.ctx, cb.tptr, network, peer);
             }
 
             // Upstream nodes always accept MULTICAST_LIKE.
             if (!authorized) {
-                authorized = cb.topologyAmUpstream(cb.ctx);
+                authorized = cb.topology.topologyAmUpstream(cb.ctx);
             }
 
             if (authorized) {
-                cb.multicasterAdd(
+                cb.multicast.multicasterAdd(
                     cb.ctx,
                     cb.tptr,
                     now,
                     nwid,
                     &mg,
-                    cb.peerAddress(cb.ctx, peer),
+                    cb.peer.peerAddress(cb.ctx, peer),
                 );
             }
 
             ptr += 18;
         }
 
-        cb.peerReceived(
+        cb.peer.peerReceived(
             cb.ctx,
             cb.tptr,
             peer,
@@ -2519,7 +2468,7 @@ pub const IncomingPacket = struct {
     ///
     /// Contains COMs, capabilities, tags, revocations, and COOs. The
     /// runtime deserializes and validates each credential type.
-    fn doNETWORK_CREDENTIALS(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doNETWORK_CREDENTIALS(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         const pkt_size = self.pkt.buf.size();
         const cred_len = pkt_size - packet.idx_payload;
 
@@ -2527,11 +2476,11 @@ pub const IncomingPacket = struct {
             const cred_data = self.pkt.buf.data()[packet.idx_payload..];
             // Pass the entire credentials payload to the runtime for parsing.
             // The runtime knows how to deserialize COMs, capabilities, tags, etc.
-            const peer_addr = cb.peerAddress(cb.ctx, peer);
+            const peer_addr = cb.peer.peerAddress(cb.ctx, peer);
             const now = cb.now(cb.ctx);
 
             // Delegate credentials parsing to runtime.
-            cb.networkPushCredentials(
+            cb.network.networkPushCredentials(
                 cb.ctx,
                 cb.tptr,
                 peer_addr,
@@ -2542,7 +2491,7 @@ pub const IncomingPacket = struct {
             );
         }
 
-        cb.peerReceived(
+        cb.peer.peerReceived(
             cb.ctx,
             cb.tptr,
             peer,
@@ -2565,33 +2514,47 @@ pub const IncomingPacket = struct {
     ///
     /// Only controllers handle this. Parses the request metadata and
     /// delegates to the network controller logic.
-    fn doNETWORK_CONFIG_REQUEST(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doNETWORK_CONFIG_REQUEST(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         const nwid = self.pkt.buf.at(u64, packet.idx_payload) catch return true;
-        const meta_data_offset = packet.idx_payload + 8;
+        const p = peer orelse return true;
+        const request_packet_id = self.pkt.packetId();
         const pkt_size = self.pkt.buf.size();
-
-        // Metadata follows the network ID (dictionary or other format).
-        const meta_ptr: ?*const anyopaque = if (meta_data_offset < pkt_size)
-            @as(?*const anyopaque, @ptrCast(self.pkt.buf.data()[meta_data_offset..].ptr))
+        const meta_data_len: u16 = if (pkt_size >= packet.network_config_request_idx.idx_dict)
+            self.pkt.buf.at(u16, packet.network_config_request_idx.idx_dict_len) catch 0
         else
-            null;
+            0;
 
-        cb.networkControllerHandleConfigRequest(
+        var meta_dict = Dictionary(network_controller_mod.metadata_dict_capacity).init();
+        if (meta_data_len != 0) {
+            const dict_data = self.pkt.buf.field(packet.network_config_request_idx.idx_dict, meta_data_len) catch return true;
+            meta_dict = Dictionary(network_controller_mod.metadata_dict_capacity).fromSlice(dict_data);
+        }
+
+        var zero_from = InetAddress.InetAddress.zero();
+        const from_addr = if (self.pkt.hops() > 0 or self.path == null)
+            &zero_from
+        else
+            cb.path.pathAddress(cb.ctx, self.path);
+
+        if (!cb.network.networkControllerHandleConfigRequest(
             cb.ctx,
             cb.tptr,
-            cb.peerAddress(cb.ctx, peer),
-            self.pkt.packetId(),
+            from_addr,
+            cb.peer.peerIdentity(cb.ctx, p),
+            request_packet_id,
             nwid,
-            meta_ptr orelse @ptrCast(&[0]u8{}),
-        );
+            &meta_dict,
+        )) {
+            self.sendErrorUnsupportedOperation(cb, p, request_packet_id, nwid);
+        }
 
-        cb.peerReceived(
+        cb.peer.peerReceived(
             cb.ctx,
             cb.tptr,
-            peer,
+            p,
             self.path,
             @as(u32, self.pkt.hops()),
-            self.pkt.packetId(),
+            request_packet_id,
             self.pkt.payloadLength(),
             @intFromEnum(Verb.network_config_request),
             0,
@@ -2608,9 +2571,9 @@ pub const IncomingPacket = struct {
     ///
     /// The payload is a chunked/compressed network config dictionary.
     /// Passes it to the network for reassembly and parsing.
-    fn doNETWORK_CONFIG(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doNETWORK_CONFIG(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         const nwid = self.pkt.buf.at(u64, packet.idx_payload) catch return true;
-        const nw = cb.nodeGetNetwork(cb.ctx, nwid);
+        const nw = cb.network.nodeGetNetwork(cb.ctx, nwid);
 
         if (nw) |network| {
             const chunk_offset = packet.idx_payload + 8;
@@ -2618,19 +2581,19 @@ pub const IncomingPacket = struct {
             if (chunk_offset < pkt_size) {
                 const chunk_len = pkt_size - chunk_offset;
                 const chunk_data = self.pkt.buf.data()[chunk_offset..];
-                cb.networkHandleConfig(
+                cb.network.networkHandleConfig(
                     cb.ctx,
                     cb.tptr,
                     network,
                     self.pkt.packetId(),
-                    cb.peerAddress(cb.ctx, peer),
+                    cb.peer.peerAddress(cb.ctx, peer),
                     chunk_data.ptr,
                     @intCast(chunk_len),
                 );
             }
         }
 
-        cb.peerReceived(
+        cb.peer.peerReceived(
             cb.ctx,
             cb.tptr,
             peer,
@@ -2652,7 +2615,7 @@ pub const IncomingPacket = struct {
     /// MULTICAST_GATHER handler — requests multicast subscribers for a group.
     ///
     /// Responds with OK(MULTICAST_GATHER) containing known subscribers.
-    fn doMULTICAST_GATHER(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doMULTICAST_GATHER(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         const nwid = self.pkt.buf.at(u64, packet.idx_payload) catch return true;
         const flags = self.pkt.buf.at(u8, packet.idx_payload + 8) catch return true;
         _ = flags;
@@ -2668,11 +2631,11 @@ pub const IncomingPacket = struct {
         const gather_limit = self.pkt.buf.at(u32, mac_offset + 10) catch return true;
 
         const mg = MulticastGroup.init(MAC.fromBytes(&mac_bytes), adi);
-        const nw = cb.nodeGetNetwork(cb.ctx, nwid);
+        const nw = cb.network.nodeGetNetwork(cb.ctx, nwid);
 
-        if (nw != null and cb.networkGate(cb.ctx, cb.tptr, nw, peer)) {
+        if (nw != null and cb.network.networkGate(cb.ctx, cb.tptr, nw, peer)) {
             // Build OK(MULTICAST_GATHER) response.
-            const peer_addr = Address.init(cb.peerAddress(cb.ctx, peer));
+            const peer_addr = Address.init(cb.peer.peerAddress(cb.ctx, peer));
             var outp = Packet.initNew(peer_addr, cb.local_identity.address(), .ok);
             outp.buf.appendByte(@intFromEnum(Verb.multicast_gather), 1) catch return true;
             outp.buf.appendInt(u64, self.pkt.packetId()) catch return true;
@@ -2681,9 +2644,9 @@ pub const IncomingPacket = struct {
             outp.buf.appendInt(u32, adi) catch return true;
 
             // Gather subscribers from multicaster.
-            const gathered = cb.multicasterGather(
+            const gathered = cb.multicast.multicasterGather(
                 cb.ctx,
-                cb.peerAddress(cb.ctx, peer),
+                cb.peer.peerAddress(cb.ctx, peer),
                 nwid,
                 &mg,
                 &outp,
@@ -2692,11 +2655,11 @@ pub const IncomingPacket = struct {
             _ = gathered;
 
             const now = cb.now(cb.ctx);
-            const peer_key = cb.peerKey(cb.ctx, peer);
-            const peer_aes = cb.peerAesKeysIfSupported(cb.ctx, peer);
-            const peer_pub = cb.peerPublicKey(cb.ctx, peer);
+            const peer_key = cb.peer.peerKey(cb.ctx, peer);
+            const peer_aes = cb.peer.peerAesKeysIfSupported(cb.ctx, peer);
+            const peer_pub = cb.peer.peerPublicKey(cb.ctx, peer);
             outp.armor(peer_key, true, false, peer_aes, peer_pub);
-            cb.peerRecordOutgoingPacket(
+            cb.peer.peerRecordOutgoingPacket(
                 cb.ctx,
                 peer,
                 self.path,
@@ -2707,10 +2670,10 @@ pub const IncomingPacket = struct {
                 now,
             );
             const out_data = outp.buf.data();
-            cb.pathSend(cb.ctx, self.path, cb.tptr, out_data.ptr, @intCast(out_data.len), now);
+            cb.path.pathSend(cb.ctx, self.path, cb.tptr, out_data.ptr, @intCast(out_data.len), now);
         }
 
-        cb.peerReceived(
+        cb.peer.peerReceived(
             cb.ctx,
             cb.tptr,
             peer,
@@ -2732,44 +2695,165 @@ pub const IncomingPacket = struct {
     /// MULTICAST_FRAME handler — receives multicast frame for a group.
     ///
     /// Delivers the frame to all local subscribers of the multicast group.
-    fn doMULTICAST_FRAME(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doMULTICAST_FRAME(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         const nwid = self.pkt.buf.at(u64, packet.idx_payload) catch return true;
         const flags = self.pkt.buf.at(u8, packet.idx_payload + 8) catch return true;
-        _ = flags;
-
-        // Parse multicast group (MAC + ADI).
-        var mac_bytes: [6]u8 = undefined;
-        var i: u32 = 0;
-        const mac_offset = packet.idx_payload + 8 + 1;
-        while (i < 6) : (i += 1) {
-            mac_bytes[i] = self.pkt.buf.at(u8, mac_offset + i) catch return true;
-        }
-        const adi = self.pkt.buf.at(u32, mac_offset + 6) catch return true;
-        const ethertype = self.pkt.buf.at(u16, mac_offset + 10) catch return true;
-        const frame_offset = mac_offset + 12;
         const pkt_size = self.pkt.buf.size();
+        const nw = cb.network.nodeGetNetwork(cb.ctx, nwid);
 
-        const nw = cb.nodeGetNetwork(cb.ctx, nwid);
-        if (nw != null and cb.networkGate(cb.ctx, cb.tptr, nw, peer)) {
-            if (frame_offset < pkt_size) {
-                const frame_len = pkt_size - frame_offset;
-                const frame_data = self.pkt.buf.data()[frame_offset..];
-                const mg = MulticastGroup.init(MAC.fromBytes(&mac_bytes), adi);
+        if (nw != null and cb.network.networkGate(cb.ctx, cb.tptr, nw, peer)) {
+            var offset: u32 = 0;
 
-                cb.multicasterReceiveMulticastFrame(
+            if ((flags & 0x01) != 0) {
+                const parsed = CertificateOfMembership.deserialize(packet.max_packet_length, &self.pkt.buf, packet.multicast_frame_idx.idx_com) catch return true;
+                const com_data = self.pkt.buf.field(packet.multicast_frame_idx.idx_com, parsed.bytes_read) catch return true;
+                _ = cb.network.networkAddCredentialCOM(cb.ctx, cb.tptr, nw, com_data.ptr, @intCast(parsed.bytes_read));
+                offset += parsed.bytes_read;
+            }
+
+            var gather_limit: u32 = 0;
+            if ((flags & 0x02) != 0) {
+                gather_limit = self.pkt.buf.at(u32, offset + packet.multicast_frame_idx.idx_gather_limit) catch return true;
+                offset += 4;
+            }
+
+            const peer_addr = Address.init(cb.peer.peerAddress(cb.ctx, peer));
+            const source_mac = if ((flags & 0x04) != 0) blk: {
+                const source_mac_data = self.pkt.buf.field(offset + packet.multicast_frame_idx.idx_source_mac, 6) catch return true;
+                offset += 6;
+                break :blk MAC.fromSlice(source_mac_data);
+            } else MAC.fromAddress(peer_addr, nwid);
+
+            const dest_mac_data = self.pkt.buf.field(offset + packet.multicast_frame_idx.idx_dest_mac, 6) catch return true;
+            const mg = MulticastGroup.init(
+                MAC.fromSlice(dest_mac_data),
+                self.pkt.buf.at(u32, offset + packet.multicast_frame_idx.idx_dest_adi) catch return true,
+            );
+            const ethertype = self.pkt.buf.at(u16, offset + packet.multicast_frame_idx.idx_ethertype) catch return true;
+            const frame_offset = offset + packet.multicast_frame_idx.idx_frame;
+
+            if (nw.?.config().multicast_limit == 0) {
+                cb.peer.peerReceived(
                     cb.ctx,
                     cb.tptr,
+                    peer,
+                    self.path,
+                    @as(u32, self.pkt.hops()),
+                    self.pkt.packetId(),
+                    self.pkt.payloadLength(),
+                    @intFromEnum(Verb.multicast_frame),
+                    0,
+                    @intFromEnum(Verb.nop),
+                    false,
                     nwid,
-                    cb.peerAddress(cb.ctx, peer),
-                    &mg,
-                    frame_data.ptr,
-                    @intCast(frame_len),
-                    ethertype,
+                    qos_no_flow,
                 );
+                return true;
+            }
+
+            if (frame_offset < pkt_size) {
+                const frame_len = pkt_size - frame_offset;
+
+                if (frame_len > 0 and frame_len <= c_api.ZT_MAX_MTU) {
+                    if (!mg.mac().isMulticast()) {
+                        cb.peer.peerReceived(
+                            cb.ctx,
+                            cb.tptr,
+                            peer,
+                            self.path,
+                            @as(u32, self.pkt.hops()),
+                            self.pkt.packetId(),
+                            self.pkt.payloadLength(),
+                            @intFromEnum(Verb.multicast_frame),
+                            0,
+                            @intFromEnum(Verb.nop),
+                            true,
+                            nwid,
+                            qos_no_flow,
+                        );
+                        return true;
+                    }
+
+                    if (!source_mac.isSet() or source_mac.isMulticast() or source_mac.eql(cb.network.networkMac(cb.ctx, nw))) {
+                        cb.peer.peerReceived(
+                            cb.ctx,
+                            cb.tptr,
+                            peer,
+                            self.path,
+                            @as(u32, self.pkt.hops()),
+                            self.pkt.packetId(),
+                            self.pkt.payloadLength(),
+                            @intFromEnum(Verb.multicast_frame),
+                            0,
+                            @intFromEnum(Verb.nop),
+                            true,
+                            nwid,
+                            qos_no_flow,
+                        );
+                        return true;
+                    }
+
+                    const frame_data = self.pkt.buf.data()[frame_offset..];
+                    if ((flags & 0x08) != 0 and nw.?.config().isMulticastReplicator(cb.local_identity.address())) {
+                        cb.multicast.multicasterReplicateMulticastFrame(
+                            cb.ctx,
+                            cb.tptr,
+                            nwid,
+                            peer_addr.toInt(),
+                            &source_mac,
+                            &mg,
+                            frame_data.ptr,
+                            @intCast(frame_len),
+                            ethertype,
+                        );
+                    }
+
+                    cb.multicast.multicasterReceiveMulticastFrame(
+                        cb.ctx,
+                        cb.tptr,
+                        nwid,
+                        peer_addr.toInt(),
+                        &mg,
+                        frame_data.ptr,
+                        @intCast(frame_len),
+                        ethertype,
+                    );
+                }
+            }
+
+            if (gather_limit != 0) {
+                var outp = Packet.initNew(self.pkt.source(), cb.local_identity.address(), .ok);
+                outp.buf.appendByte(@intFromEnum(Verb.multicast_frame), 1) catch return true;
+                outp.buf.appendInt(u64, self.pkt.packetId()) catch return true;
+                outp.buf.appendInt(u64, nwid) catch return true;
+                var mac_bytes: [6]u8 = undefined;
+                mg.mac().copyTo(&mac_bytes);
+                outp.buf.appendBytes(&mac_bytes) catch return true;
+                outp.buf.appendInt(u32, mg.adi()) catch return true;
+                outp.buf.appendInt(u8, 0x02) catch return true;
+                if (cb.multicast.multicasterGather(cb.ctx, peer_addr.toInt(), nwid, &mg, &outp, gather_limit) > 0) {
+                    const now = cb.now(cb.ctx);
+                    const peer_key = cb.peer.peerKey(cb.ctx, peer);
+                    const peer_aes = cb.peer.peerAesKeysIfSupported(cb.ctx, peer);
+                    const peer_pub = cb.peer.peerPublicKey(cb.ctx, peer);
+                    outp.armor(peer_key, true, false, peer_aes, peer_pub);
+                    cb.peer.peerRecordOutgoingPacket(
+                        cb.ctx,
+                        peer,
+                        self.path,
+                        outp.packetId(),
+                        outp.payloadLength(),
+                        @intFromEnum(outp.verb()),
+                        qos_no_flow,
+                        now,
+                    );
+                    const out_data = outp.buf.data();
+                    cb.path.pathSend(cb.ctx, self.path, cb.tptr, out_data.ptr, @intCast(out_data.len), now);
+                }
             }
         }
 
-        cb.peerReceived(
+        cb.peer.peerReceived(
             cb.ctx,
             cb.tptr,
             peer,
@@ -2780,7 +2864,7 @@ pub const IncomingPacket = struct {
             @intFromEnum(Verb.multicast_frame),
             0,
             @intFromEnum(Verb.nop),
-            false,
+            nw != null,
             nwid,
             qos_no_flow,
         );
@@ -2792,13 +2876,13 @@ pub const IncomingPacket = struct {
     ///
     /// Contains a list of IP addresses where the peer can be reached.
     /// Passed to the peer for connection attempts.
-    fn doPUSH_DIRECT_PATHS(self: *Self, cb: *const Callbacks, peer: ?*anyopaque) bool {
+    fn doPUSH_DIRECT_PATHS(self: *Self, cb: *const Callbacks, peer: ?*Peer) bool {
         const pkt_size = self.pkt.buf.size();
         const paths_len = pkt_size - packet.idx_payload;
 
         if (paths_len > 0) {
             const paths_data = self.pkt.buf.data()[packet.idx_payload..];
-            cb.peerReceivePushDirectPaths(
+            cb.peer.peerReceivePushDirectPaths(
                 cb.ctx,
                 cb.tptr,
                 peer,
@@ -2808,7 +2892,7 @@ pub const IncomingPacket = struct {
             );
         }
 
-        cb.peerReceived(
+        cb.peer.peerReceived(
             cb.ctx,
             cb.tptr,
             peer,
@@ -3027,7 +3111,7 @@ const TestContext = struct {
     // Tracking fields
     now_value: i64 = 1000000,
     trusted_path: bool = false,
-    peer_handle: ?*anyopaque = null,
+    peer_handle: ?*Peer = null,
     whois_requested: bool = false,
     whois_addr: u64 = 0,
     stats_logged: bool = false,
@@ -3056,6 +3140,18 @@ const TestContext = struct {
     event_posted: bool = false,
     event_type: u32 = 0,
     flow_hashing_supported: bool = false,
+    multicast_received: bool = false,
+    multicast_nwid: u64 = 0,
+    multicast_source_addr: u64 = 0,
+    multicast_ethertype: u32 = 0,
+    multicast_frame_len: u32 = 0,
+    multicast_gather_limit: u32 = 0,
+    multicast_replicated: bool = false,
+    multicast_replicated_nwid: u64 = 0,
+    multicast_replicated_origin: u64 = 0,
+    multicast_replicated_ethertype: u32 = 0,
+    multicast_replicated_frame_len: u32 = 0,
+    test_network: ?*Network = null,
 
     // Fixed test data
     test_key: [32]u8 = [_]u8{0x42} ** 32,
@@ -3074,74 +3170,87 @@ const TestContext = struct {
             .now = &nowCb,
             .topologyShouldInboundPathBeTrusted = &trustedCb,
             .topologyGetPeer = &getPeerCb,
-            .switchRequestWhois = &whoisCb,
+            .sw = .{
+                .switchRequestWhois = &whoisCb,
+                .switchDoAnythingWaitingForPeer = &switchDoAnythingWaitingForPeerCb,
+            },
             .nodeStatsLogVerb = &statsLogCb,
             .nodePostEvent = &postEventCb,
-            .peerKey = &peerKeyCb,
-            .peerAesKeys = &peerAesCb,
-            .peerAesKeysIfSupported = &peerAesSupportedCb,
-            .peerPublicKey = &peerPubCb,
-            .peerAddress = &peerAddrCb,
-            .peerReceived = &peerReceivedCb,
-            .peerRecordIncomingInvalidPacket = &peerInvalidCb,
-            .peerRecordOutgoingPacket = &peerOutgoingCb,
-            .peerRateGateQoS = &peerQoSGateCb,
-            .peerReceivedQoS = &peerQoSReceivedCb,
-            .peerRateGatePathNegotiation = &peerPathNegGateCb,
-            .peerProcessIncomingPathNegotiationRequest = &peerPathNegCb,
-            .peerFlowHashingSupported = &peerFlowHashCb,
-            .pathSend = &pathSendCb,
-            .pathAddress = &pathAddrCb,
-            .pathLocalSocket = &pathSocketCb,
-            .pathRateGateEchoRequest = &pathEchoGateCb,
+            .peer = .{
+                .peerKey = &peerKeyCb,
+                .peerAesKeys = &peerAesCb,
+                .peerAesKeysIfSupported = &peerAesSupportedCb,
+                .peerPublicKey = &peerPubCb,
+                .peerAddress = &peerAddrCb,
+                .peerReceived = &peerReceivedCb,
+                .peerRecordIncomingInvalidPacket = &peerInvalidCb,
+                .peerRecordOutgoingPacket = &peerOutgoingCb,
+                .peerRateGateQoS = &peerQoSGateCb,
+                .peerReceivedQoS = &peerQoSReceivedCb,
+                .peerRateGatePathNegotiation = &peerPathNegGateCb,
+                .peerProcessIncomingPathNegotiationRequest = &peerPathNegCb,
+                .peerFlowHashingSupported = &peerFlowHashCb,
+                .peerIdentity = &peerIdentityCb,
+                .peerSetRemoteVersion = &peerSetRemoteVersionCb,
+                .peerRateGateInboundWhoisRequest = &peerRateGateInboundWhoisRequestCb,
+                .peerAttemptToContactAt = &peerAttemptToContactAtCb,
+                .peerReceivePushDirectPaths = &peerReceivePushDirectPathsCb,
+            },
+            .path = .{
+                .pathSend = &pathSendCb,
+                .pathAddress = &pathAddrCb,
+                .pathLocalSocket = &pathSocketCb,
+                .pathRateGateEchoRequest = &pathEchoGateCb,
+                .pathUpdateLatency = &pathUpdateLatencyCb,
+            },
+            .topology = .{
+                .topologyAddPeer = &topologyAddPeerCb,
+                .topologyIsUpstream = &topologyIsUpstreamCb,
+                .topologyPlanetWorldId = &topologyPlanetWorldIdCb,
+                .topologyPlanetWorldTimestamp = &topologyPlanetWorldTimestampCb,
+                .topologySerializePlanet = &topologySerializePlanetCb,
+                .topologySerializeUpdatedMoons = &topologySerializeUpdatedMoonsCb,
+                .topologyShouldAcceptWorldUpdateFrom = &topologyShouldAcceptWorldUpdateFromCb,
+                .topologyAddWorld = &topologyAddWorldCb,
+                .topologyAmUpstream = &topologyAmUpstreamCb,
+                .topologyGetIdentity = &topologyGetIdentityCb,
+            },
+            .network = .{
+                .nodeGetNetwork = &nodeGetNetworkCb,
+                .nodeExpectingReplyTo = &nodeExpectingReplyToCb,
+                .networkController = &networkControllerCb,
+                .networkSetNotFound = &networkSetNotFoundCb,
+                .networkSetAccessDenied = &networkSetAccessDeniedCb,
+                .networkGate = &networkGateCb,
+                .networkPeerRequestedCredentials = &networkPeerRequestedCredentialsCb,
+                .networkConfigHasCom = &networkConfigHasComCb,
+                .networkSetAuthenticationRequired = &networkSetAuthenticationRequiredCb,
+                .networkHandleConfigChunk = &networkHandleConfigChunkCb,
+                .networkAddCredentialCOM = &networkAddCredentialCOMCb,
+                .networkMac = &networkMacCb,
+                .networkUserPtr = &networkUserPtrCb,
+                .networkFilterIncomingPacket = &networkFilterIncomingPacketCb,
+                .networkPushCredentials = &networkPushCredentialsCb,
+                .networkControllerHandleConfigRequest = &networkControllerHandleConfigRequestCb,
+                .networkHandleConfig = &networkHandleConfigCb,
+            },
+            .multicast = .{
+                .multicasterRemove = &multicasterRemoveCb,
+                .multicasterAddMultiple = &multicasterAddMultipleCb,
+                .multicasterAdd = &multicasterAddCb,
+                .multicasterGather = &multicasterGatherCb,
+                .multicasterReceiveMulticastFrame = &multicasterReceiveMulticastFrameCb,
+                .multicasterReplicateMulticastFrame = &multicasterReplicateMulticastFrameCb,
+            },
             .traceIncomingPacketMacFailure = &traceMacFailCb,
             .traceIncomingPacketInvalid = &traceInvalidCb,
             .traceIncomingPacketDroppedHELLO = &traceDroppedHelloCb,
             .nodeRateGateIdentityVerification = &rateGateIdentityCb,
-            .peerIdentity = &peerIdentityCb,
-            .peerSetRemoteVersion = &peerSetRemoteVersionCb,
-            .topologyAddPeer = &topologyAddPeerCb,
-            .topologyIsUpstream = &topologyIsUpstreamCb,
-            .topologyPlanetWorldId = &topologyPlanetWorldIdCb,
-            .topologyPlanetWorldTimestamp = &topologyPlanetWorldTimestampCb,
-            .topologySerializePlanet = &topologySerializePlanetCb,
-            .topologySerializeUpdatedMoons = &topologySerializeUpdatedMoonsCb,
-            .topologyShouldAcceptWorldUpdateFrom = &topologyShouldAcceptWorldUpdateFromCb,
-            .topologyAddWorld = &topologyAddWorldCb,
             .selfAwarenessIam = &selfAwarenessIamCb,
-            .pathUpdateLatency = &pathUpdateLatencyCb,
-            .nodeGetNetwork = &nodeGetNetworkCb,
-            .nodeExpectingReplyTo = &nodeExpectingReplyToCb,
-            .networkController = &networkControllerCb,
-            .networkSetNotFound = &networkSetNotFoundCb,
-            .networkSetAccessDenied = &networkSetAccessDeniedCb,
-            .networkGate = &networkGateCb,
-            .networkPeerRequestedCredentials = &networkPeerRequestedCredentialsCb,
-            .networkConfigHasCom = &networkConfigHasComCb,
-            .networkSetAuthenticationRequired = &networkSetAuthenticationRequiredCb,
-            .networkHandleConfigChunk = &networkHandleConfigChunkCb,
-            .multicasterRemove = &multicasterRemoveCb,
-            .multicasterAddMultiple = &multicasterAddMultipleCb,
-            .switchDoAnythingWaitingForPeer = &switchDoAnythingWaitingForPeerCb,
-            .networkAddCredentialCOM = &networkAddCredentialCOMCb,
-            .topologyAmUpstream = &topologyAmUpstreamCb,
-            .peerRateGateInboundWhoisRequest = &peerRateGateInboundWhoisRequestCb,
-            .topologyGetIdentity = &topologyGetIdentityCb,
             .nodeShouldUsePathForZeroTierTraffic = &nodeShouldUsePathForZeroTierTrafficCb,
             .nodePrng = &nodePrngCb,
             .nodePutPacket = &nodePutPacketCb,
-            .peerAttemptToContactAt = &peerAttemptToContactAtCb,
-            .networkMac = &networkMacCb,
-            .networkUserPtr = &networkUserPtrCb,
-            .networkFilterIncomingPacket = &networkFilterIncomingPacketCb,
             .pmPutFrame = &pmPutFrameCb,
-            .multicasterAdd = &multicasterAddCb,
-            .networkPushCredentials = &networkPushCredentialsCb,
-            .networkControllerHandleConfigRequest = &networkControllerHandleConfigRequestCb,
-            .networkHandleConfig = &networkHandleConfigCb,
-            .multicasterGather = &multicasterGatherCb,
-            .multicasterReceiveMulticastFrame = &multicasterReceiveMulticastFrameCb,
-            .peerReceivePushDirectPaths = &peerReceivePushDirectPathsCb,
         };
     }
 
@@ -3157,7 +3266,7 @@ const TestContext = struct {
         return self.trusted_path;
     }
 
-    fn getPeerCb(ctx: ?*anyopaque, _: ?*anyopaque, _: u64) ?*anyopaque {
+    fn getPeerCb(ctx: ?*anyopaque, _: ?*anyopaque, _: u64) ?*Peer {
         const self = ctxCast(ctx);
         return self.peer_handle;
     }
@@ -3181,25 +3290,25 @@ const TestContext = struct {
         self.event_type = event;
     }
 
-    fn peerKeyCb(ctx: ?*anyopaque, _: ?*anyopaque) *const [32]u8 {
+    fn peerKeyCb(ctx: ?*anyopaque, _: ?*Peer) *const [32]u8 {
         const self = ctxCast(ctx);
         return &self.test_key;
     }
 
-    fn peerAesCb(_: ?*anyopaque, _: ?*anyopaque) ?*const [2]Aes {
+    fn peerAesCb(_: ?*anyopaque, _: ?*Peer) ?*const [2]Aes {
         return null;
     }
 
-    fn peerAesSupportedCb(_: ?*anyopaque, _: ?*anyopaque) ?*const [2]Aes {
+    fn peerAesSupportedCb(_: ?*anyopaque, _: ?*Peer) ?*const [2]Aes {
         return null;
     }
 
-    fn peerPubCb(ctx: ?*anyopaque, _: ?*anyopaque) *const ecc.Public {
+    fn peerPubCb(ctx: ?*anyopaque, _: ?*Peer) *const ecc.Public {
         const self = ctxCast(ctx);
         return &self.test_pub_key;
     }
 
-    fn peerAddrCb(ctx: ?*anyopaque, _: ?*anyopaque) u64 {
+    fn peerAddrCb(ctx: ?*anyopaque, _: ?*Peer) u64 {
         const self = ctxCast(ctx);
         return self.test_peer_addr;
     }
@@ -3207,8 +3316,8 @@ const TestContext = struct {
     fn peerReceivedCb(
         ctx: ?*anyopaque,
         _: ?*anyopaque,
-        _: ?*anyopaque,
-        _: ?*anyopaque,
+        _: ?*Peer,
+        _: ?*Path,
         _: u32,
         pkt_id: u64,
         _: u32,
@@ -3227,15 +3336,15 @@ const TestContext = struct {
         self.received_trust = trust;
     }
 
-    fn peerInvalidCb(ctx: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) void {
+    fn peerInvalidCb(ctx: ?*anyopaque, _: ?*Peer, _: ?*Path) void {
         const self = ctxCast(ctx);
         self.invalid_packet_recorded = true;
     }
 
     fn peerOutgoingCb(
         ctx: ?*anyopaque,
-        _: ?*anyopaque,
-        _: ?*anyopaque,
+        _: ?*Peer,
+        _: ?*Path,
         pkt_id: u64,
         _: u32,
         verb_val: u32,
@@ -3248,15 +3357,15 @@ const TestContext = struct {
         self.outgoing_verb = verb_val;
     }
 
-    fn peerQoSGateCb(ctx: ?*anyopaque, _: ?*anyopaque, _: i64, _: ?*anyopaque) bool {
+    fn peerQoSGateCb(ctx: ?*anyopaque, _: ?*Peer, _: i64, _: ?*Path) bool {
         const self = ctxCast(ctx);
         return self.qos_rate_ok;
     }
 
     fn peerQoSReceivedCb(
         ctx: ?*anyopaque,
-        _: ?*anyopaque,
-        _: ?*anyopaque,
+        _: ?*Peer,
+        _: ?*Path,
         _: i64,
         count: u32,
         _: [*]const u64,
@@ -3266,43 +3375,43 @@ const TestContext = struct {
         self.qos_received_count = count;
     }
 
-    fn peerPathNegGateCb(ctx: ?*anyopaque, _: ?*anyopaque, _: i64, _: ?*anyopaque) bool {
+    fn peerPathNegGateCb(ctx: ?*anyopaque, _: ?*Peer, _: i64, _: ?*Path) bool {
         const self = ctxCast(ctx);
         return self.path_neg_rate_ok;
     }
 
-    fn peerPathNegCb(ctx: ?*anyopaque, _: ?*anyopaque, _: i64, _: ?*anyopaque, util: i16) void {
+    fn peerPathNegCb(ctx: ?*anyopaque, _: ?*Peer, _: i64, _: ?*Path, util: i16) void {
         const self = ctxCast(ctx);
         self.path_neg_received = true;
         self.path_neg_utility = util;
     }
 
-    fn peerFlowHashCb(ctx: ?*anyopaque, _: ?*anyopaque) bool {
+    fn peerFlowHashCb(ctx: ?*anyopaque, _: ?*Peer) bool {
         const self = ctxCast(ctx);
         return self.flow_hashing_supported;
     }
 
-    fn pathSendCb(ctx: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: [*]const u8, len: u32, _: i64) void {
+    fn pathSendCb(ctx: ?*anyopaque, _: ?*Path, _: ?*anyopaque, _: [*]const u8, len: u32, _: i64) void {
         const self = ctxCast(ctx);
         self.sent_data_len = len;
     }
 
-    fn pathAddrCb(ctx: ?*anyopaque, _: ?*anyopaque) *const InetAddress.InetAddress {
+    fn pathAddrCb(ctx: ?*anyopaque, _: ?*Path) *const InetAddress.InetAddress {
         const self = ctxCast(ctx);
         return &self.test_path_addr;
     }
 
-    fn pathSocketCb(ctx: ?*anyopaque, _: ?*anyopaque) i64 {
+    fn pathSocketCb(ctx: ?*anyopaque, _: ?*Path) i64 {
         const self = ctxCast(ctx);
         return self.test_local_socket;
     }
 
-    fn pathEchoGateCb(ctx: ?*anyopaque, _: ?*anyopaque, _: i64) bool {
+    fn pathEchoGateCb(ctx: ?*anyopaque, _: ?*Path, _: i64) bool {
         const self = ctxCast(ctx);
         return self.echo_rate_ok;
     }
 
-    fn traceMacFailCb(ctx: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u32, reason: [*:0]const u8) void {
+    fn traceMacFailCb(ctx: ?*anyopaque, _: ?*anyopaque, _: ?*Path, _: u64, _: u64, _: u32, reason: [*:0]const u8) void {
         const self = ctxCast(ctx);
         self.mac_failure_logged = true;
         const len = mem.len(reason);
@@ -3311,7 +3420,7 @@ const TestContext = struct {
         self.mac_failure_reason[copy_len] = 0;
     }
 
-    fn traceInvalidCb(ctx: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u32, _: u32, reason: [*:0]const u8) void {
+    fn traceInvalidCb(ctx: ?*anyopaque, _: ?*anyopaque, _: ?*Path, _: u64, _: u64, _: u32, _: u32, reason: [*:0]const u8) void {
         const self = ctxCast(ctx);
         self.invalid_logged = true;
         const len = mem.len(reason);
@@ -3321,16 +3430,16 @@ const TestContext = struct {
     }
 
     // Stub callbacks for new handlers
-    fn traceDroppedHelloCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: [*:0]const u8) void {}
+    fn traceDroppedHelloCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*Path, _: u64, _: u64, _: [*:0]const u8) void {}
     fn rateGateIdentityCb(_: ?*anyopaque, _: i64, _: *const InetAddress.InetAddress) bool {
         return true;
     }
-    fn peerIdentityCb(ctx: ?*anyopaque, _: ?*anyopaque) *const Identity {
+    fn peerIdentityCb(ctx: ?*anyopaque, _: ?*Peer) *const Identity {
         const self = ctxCast(ctx);
         return &self.test_identity;
     }
-    fn peerSetRemoteVersionCb(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: u32, _: u32, _: u32) void {}
-    fn topologyAddPeerCb(_: ?*anyopaque, _: ?*anyopaque, _: *const Identity) ?*anyopaque {
+    fn peerSetRemoteVersionCb(_: ?*anyopaque, _: ?*Peer, _: u32, _: u32, _: u32, _: u32) void {}
+    fn topologyAddPeerCb(_: ?*anyopaque, _: ?*anyopaque, _: *const Identity) ?*Peer {
         return null;
     }
     fn topologyIsUpstreamCb(_: ?*anyopaque, _: *const Identity) bool {
@@ -3355,37 +3464,38 @@ const TestContext = struct {
         return false;
     }
     fn selfAwarenessIamCb(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: i64, _: *const InetAddress.InetAddress, _: *const InetAddress.InetAddress, _: bool, _: i64) void {}
-    fn pathUpdateLatencyCb(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: i64) void {}
-    fn nodeGetNetworkCb(_: ?*anyopaque, _: u64) ?*anyopaque {
-        return null;
+    fn pathUpdateLatencyCb(_: ?*anyopaque, _: ?*Path, _: u32, _: i64) void {}
+    fn nodeGetNetworkCb(ctx: ?*anyopaque, _: u64) ?*Network {
+        const self = ctxCast(ctx);
+        return self.test_network;
     }
     fn nodeExpectingReplyToCb(_: ?*anyopaque, _: u64) bool {
         return false;
     }
-    fn networkControllerCb(_: ?*anyopaque, _: ?*anyopaque) u64 {
+    fn networkControllerCb(_: ?*anyopaque, _: ?*Network) u64 {
         return 0;
     }
-    fn networkSetNotFoundCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) void {}
-    fn networkSetAccessDeniedCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) void {}
-    fn networkGateCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) bool {
+    fn networkSetNotFoundCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*Network) void {}
+    fn networkSetAccessDeniedCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*Network) void {}
+    fn networkGateCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*Network, _: ?*Peer) bool {
         return true;
     }
-    fn networkPeerRequestedCredentialsCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: i64) void {}
-    fn networkConfigHasComCb(_: ?*anyopaque, _: ?*anyopaque) bool {
+    fn networkPeerRequestedCredentialsCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*Network, _: u64, _: i64) void {}
+    fn networkConfigHasComCb(_: ?*anyopaque, _: ?*Network) bool {
         return false;
     }
-    fn networkSetAuthenticationRequiredCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: [*:0]const u8) void {}
-    fn networkHandleConfigChunkCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: [*]const u8, _: u32, _: u32) void {}
+    fn networkSetAuthenticationRequiredCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*Network, _: [*:0]const u8) void {}
+    fn networkHandleConfigChunkCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*Network, _: u64, _: u64, _: [*]const u8, _: u32, _: u32) void {}
     fn multicasterRemoveCb(_: ?*anyopaque, _: u64, _: *const [6]u8, _: u32, _: u64) void {}
     fn multicasterAddMultipleCb(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: u64, _: *const [6]u8, _: u32, _: [*]const u8, _: u32, _: u32) void {}
-    fn switchDoAnythingWaitingForPeerCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) void {}
-    fn networkAddCredentialCOMCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: [*]const u8, _: u32) bool {
+    fn switchDoAnythingWaitingForPeerCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*Peer) void {}
+    fn networkAddCredentialCOMCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*Network, _: [*]const u8, _: u32) bool {
         return false;
     }
     fn topologyAmUpstreamCb(_: ?*anyopaque) bool {
         return false;
     }
-    fn peerRateGateInboundWhoisRequestCb(_: ?*anyopaque, _: ?*anyopaque, _: i64) bool {
+    fn peerRateGateInboundWhoisRequestCb(_: ?*anyopaque, _: ?*Peer, _: i64) bool {
         return true;
     }
     fn topologyGetIdentityCb(_: ?*anyopaque, _: ?*anyopaque, _: u64) ?*const Identity {
@@ -3398,26 +3508,45 @@ const TestContext = struct {
         return 0x1234567890abcdef;
     }
     fn nodePutPacketCb(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress.InetAddress, _: [*]const u8, _: u32, _: u32) void {}
-    fn peerAttemptToContactAtCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress.InetAddress, _: i64, _: bool) void {}
-    fn networkMacCb(_: ?*anyopaque, _: ?*anyopaque) MAC {
+    fn peerAttemptToContactAtCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*Peer, _: i64, _: *const InetAddress.InetAddress, _: i64, _: bool) void {}
+    fn networkMacCb(_: ?*anyopaque, _: ?*Network) MAC {
         return MAC.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0 });
     }
-    fn networkUserPtrCb(_: ?*anyopaque, _: ?*anyopaque) ?*anyopaque {
+    fn networkUserPtrCb(_: ?*anyopaque, _: ?*Network) ?*anyopaque {
         return null;
     }
-    fn networkFilterIncomingPacketCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: *const MAC, _: *const MAC, _: [*]const u8, _: u32, _: u32, _: u32) i32 {
+    fn networkFilterIncomingPacketCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*Network, _: ?*Peer, _: u64, _: *const MAC, _: *const MAC, _: [*]const u8, _: u32, _: u32, _: u32) i32 {
         return 1;
     }
     fn pmPutFrameCb(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: ?*anyopaque, _: *const MAC, _: *const MAC, _: u32, _: u32, _: *const anyopaque, _: u32, _: i32) void {}
     fn multicasterAddCb(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: u64, _: *const MulticastGroup, _: u64) void {}
-    fn networkPushCredentialsCb(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: ?*anyopaque, _: i64, _: [*]const u8, _: u32) void {}
-    fn networkControllerHandleConfigRequestCb(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u64, _: *const anyopaque) void {}
-    fn networkHandleConfigCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: [*]const u8, _: u32) void {}
-    fn multicasterGatherCb(_: ?*anyopaque, _: u64, _: u64, _: *const MulticastGroup, _: *Packet, _: u32) u32 {
+    fn networkPushCredentialsCb(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: ?*Network, _: i64, _: [*]const u8, _: u32) void {}
+    fn networkControllerHandleConfigRequestCb(_: ?*anyopaque, _: ?*anyopaque, _: *const InetAddress.InetAddress, _: *const Identity, _: u64, _: u64, _: *const Dictionary(network_controller_mod.metadata_dict_capacity)) bool {
+        return true;
+    }
+    fn networkHandleConfigCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*Network, _: u64, _: u64, _: [*]const u8, _: u32) void {}
+    fn multicasterGatherCb(ctx: ?*anyopaque, _: u64, _: u64, _: *const MulticastGroup, _: *Packet, limit: u32) u32 {
+        const self = ctxCast(ctx);
+        self.multicast_gather_limit = limit;
         return 0;
     }
-    fn multicasterReceiveMulticastFrameCb(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: *const MulticastGroup, _: [*]const u8, _: u32, _: u32) void {}
-    fn peerReceivePushDirectPathsCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: [*]const u8, _: u32, _: i64) void {}
+    fn multicasterReceiveMulticastFrameCb(ctx: ?*anyopaque, _: ?*anyopaque, nwid: u64, source_addr: u64, _: *const MulticastGroup, _: [*]const u8, frame_len: u32, ethertype: u32) void {
+        const self = ctxCast(ctx);
+        self.multicast_received = true;
+        self.multicast_nwid = nwid;
+        self.multicast_source_addr = source_addr;
+        self.multicast_ethertype = ethertype;
+        self.multicast_frame_len = frame_len;
+    }
+    fn multicasterReplicateMulticastFrameCb(ctx: ?*anyopaque, _: ?*anyopaque, nwid: u64, origin_addr: u64, _: *const MAC, _: *const MulticastGroup, _: [*]const u8, frame_len: u32, ethertype: u32) void {
+        const self = ctxCast(ctx);
+        self.multicast_replicated = true;
+        self.multicast_replicated_nwid = nwid;
+        self.multicast_replicated_origin = origin_addr;
+        self.multicast_replicated_ethertype = ethertype;
+        self.multicast_replicated_frame_len = frame_len;
+    }
+    fn peerReceivePushDirectPathsCb(_: ?*anyopaque, _: ?*anyopaque, _: ?*Peer, _: [*]const u8, _: u32, _: i64) void {}
 
     fn ctxCast(ctx: ?*anyopaque) *TestContext {
         return @ptrCast(@alignCast(ctx.?));
@@ -3450,9 +3579,9 @@ test "IncomingPacket: init from data" {
     const src = Address.init(0x1122334455);
     var pkt = Packet.initNew(dest, src, .hello);
     const raw = pkt.buf.data();
-    var dummy_path: u8 = 0;
+    var dummy_path = Path.init();
 
-    var ip = try IncomingPacket.init(raw, @ptrCast(&dummy_path), 12345);
+    var ip = try IncomingPacket.init(raw, &dummy_path, 12345);
     try testing.expectEqual(@as(i64, 12345), ip.receive_time);
     try testing.expect(ip.path != null);
     try testing.expect(!ip.authenticated);
@@ -3463,9 +3592,8 @@ test "IncomingPacket: init from data" {
 test "IncomingPacket: tryDecode trusted path" {
     var tctx = TestContext{};
     tctx.trusted_path = true;
-    // Set up a sentinel peer handle.
-    var peer_sentinel: u8 = 0xAB;
-    tctx.peer_handle = @ptrCast(&peer_sentinel);
+    var peer_handle = std.mem.zeroes(Peer);
+    tctx.peer_handle = &peer_handle;
 
     var cb = tctx.getCallbacks();
 
@@ -3540,8 +3668,8 @@ test "IncomingPacket: tryDecode unknown peer requests WHOIS" {
 
 test "IncomingPacket: tryDecode invalid MAC" {
     var tctx = TestContext{};
-    var peer_sentinel: u8 = 0xAB;
-    tctx.peer_handle = @ptrCast(&peer_sentinel);
+    var peer_handle = std.mem.zeroes(Peer);
+    tctx.peer_handle = &peer_handle;
     // Use wrong key so dearmor fails.
     tctx.test_key = [_]u8{0x99} ** 32;
 
@@ -3569,8 +3697,8 @@ test "IncomingPacket: tryDecode invalid MAC" {
 
 test "IncomingPacket: tryDecode successful dearmor dispatches to verb" {
     var tctx = TestContext{};
-    var peer_sentinel: u8 = 0xAB;
-    tctx.peer_handle = @ptrCast(&peer_sentinel);
+    var peer_handle = std.mem.zeroes(Peer);
+    tctx.peer_handle = &peer_handle;
     const key: [32]u8 = [_]u8{0x42} ** 32;
     tctx.test_key = key;
 
@@ -3621,7 +3749,7 @@ test "IncomingPacket: doQosMeasurement parses records" {
         .authenticated = true,
     };
 
-    const result = ip.doQosMeasurement(&cb, @ptrCast(&tctx));
+    const result = ip.doQosMeasurement(&cb, null);
     try testing.expect(result);
     try testing.expectEqual(@as(u32, 3), tctx.qos_received_count);
 }
@@ -3647,7 +3775,7 @@ test "IncomingPacket: doQosMeasurement rate limited" {
         .authenticated = true,
     };
 
-    const result = ip.doQosMeasurement(&cb, @ptrCast(&tctx));
+    const result = ip.doQosMeasurement(&cb, null);
     try testing.expect(result);
     try testing.expectEqual(@as(u32, 0), tctx.qos_received_count);
 }
@@ -3674,7 +3802,7 @@ test "IncomingPacket: doQosMeasurement rejects oversized" {
         .authenticated = true,
     };
 
-    const result = ip.doQosMeasurement(&cb, @ptrCast(&tctx));
+    const result = ip.doQosMeasurement(&cb, null);
     try testing.expect(result);
     try testing.expectEqual(@as(u32, 0), tctx.qos_received_count);
 }
@@ -3701,7 +3829,7 @@ test "IncomingPacket: doECHO sends OK response" {
         .authenticated = true,
     };
 
-    const result = ip.doECHO(&cb, @ptrCast(&tctx));
+    const result = ip.doECHO(&cb, tctx.peer_handle);
     try testing.expect(result);
     try testing.expect(tctx.outgoing_recorded);
     try testing.expect(tctx.sent_data_len > 0);
@@ -3728,7 +3856,7 @@ test "IncomingPacket: doECHO rate limited" {
         .authenticated = true,
     };
 
-    const result = ip.doECHO(&cb, @ptrCast(&tctx));
+    const result = ip.doECHO(&cb, tctx.peer_handle);
     try testing.expect(result);
     try testing.expect(!tctx.outgoing_recorded);
 }
@@ -3755,7 +3883,7 @@ test "IncomingPacket: doUSER_MESSAGE posts event" {
         .authenticated = true,
     };
 
-    const result = ip.doUSER_MESSAGE(&cb, @ptrCast(&tctx));
+    const result = ip.doUSER_MESSAGE(&cb, tctx.peer_handle);
     try testing.expect(result);
     try testing.expect(tctx.event_posted);
     try testing.expectEqual(@as(u32, c_api.ZT_EVENT_USER_MESSAGE), tctx.event_type);
@@ -3782,10 +3910,104 @@ test "IncomingPacket: doUSER_MESSAGE too short is no-op" {
         .authenticated = true,
     };
 
-    const result = ip.doUSER_MESSAGE(&cb, @ptrCast(&tctx));
+    const result = ip.doUSER_MESSAGE(&cb, tctx.peer_handle);
     try testing.expect(result);
     try testing.expect(!tctx.event_posted);
     try testing.expect(tctx.received_count > 0);
+}
+
+test "IncomingPacket: doMULTICAST_FRAME parses gather and explicit source" {
+    var tctx = TestContext{};
+    tctx.test_peer_addr = 0xAABBCCDDEE;
+    var net = Network.init(testing.allocator, 0x8056c2e21c000001, Address.init(0x1122334455), null, .{});
+    defer net.deinit();
+    net._config.multicast_limit = 16;
+    net._config.rule_count = 1;
+    net._config.rules_arr[0].t = @as(u8, c_api.ZT_NETWORK_RULE_ACTION_ACCEPT);
+    tctx.test_network = &net;
+
+    var cb = tctx.getCallbacks();
+
+    const nwid: u64 = 0x8056c2e21c000001;
+    const src_mac = MAC.init(0x001122334455);
+    const dest_group = MulticastGroup.init(MAC.init(0x01005E000001), 0x12345678);
+    const payload = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+
+    var pkt = Packet.initNew(Address.init(tctx.test_peer_addr), Address.init(0x1122334455), .multicast_frame);
+    pkt.buf.appendInt(u64, nwid) catch unreachable;
+    pkt.buf.appendInt(u8, 0x06) catch unreachable;
+    pkt.buf.appendInt(u32, 9) catch unreachable;
+    try src_mac.appendTo(packet.max_packet_length, &pkt.buf);
+    var dest_mac_bytes: [6]u8 = undefined;
+    dest_group.mac().copyTo(&dest_mac_bytes);
+    pkt.buf.appendBytes(&dest_mac_bytes) catch unreachable;
+    pkt.buf.appendInt(u32, dest_group.adi()) catch unreachable;
+    pkt.buf.appendInt(u16, ethertype_ipv4) catch unreachable;
+    pkt.buf.appendBytes(&payload) catch unreachable;
+
+    var ip = IncomingPacket{
+        .pkt = pkt,
+        .receive_time = 1000,
+        .path = null,
+        .authenticated = true,
+    };
+
+    const result = ip.doMULTICAST_FRAME(&cb, tctx.peer_handle);
+    try testing.expect(result);
+    try testing.expect(tctx.multicast_received);
+    try testing.expectEqual(nwid, tctx.multicast_nwid);
+    try testing.expectEqual(tctx.test_peer_addr, tctx.multicast_source_addr);
+    try testing.expectEqual(@as(u32, ethertype_ipv4), tctx.multicast_ethertype);
+    try testing.expectEqual(@as(u32, payload.len), tctx.multicast_frame_len);
+    try testing.expectEqual(@as(u32, 9), tctx.multicast_gather_limit);
+    try testing.expect(tctx.received_trust);
+}
+
+test "IncomingPacket: doMULTICAST_FRAME replicates when flagged and local node is replicator" {
+    var tctx = TestContext{};
+    tctx.test_peer_addr = 0xAABBCCDDEE;
+    var net = Network.init(testing.allocator, 0x8056c2e21c000001, Address.init(0x1122334455), null, .{});
+    defer net.deinit();
+    net._config.multicast_limit = 16;
+    net._config.rule_count = 1;
+    net._config.rules_arr[0].t = @as(u8, c_api.ZT_NETWORK_RULE_ACTION_ACCEPT);
+    try testing.expect(net._config.addSpecialist(tctx.test_identity.address(), @import("network_config.zig").specialist_type_multicast_replicator));
+    tctx.test_network = &net;
+
+    var cb = tctx.getCallbacks();
+
+    const nwid: u64 = 0x8056c2e21c000001;
+    const source_mac = MAC.init(0x001122334455);
+    const dest_group = MulticastGroup.init(MAC.init(0x01005E000001), 0x12345678);
+    const payload = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+
+    var pkt = Packet.initNew(Address.init(tctx.test_peer_addr), Address.init(0x1122334455), .multicast_frame);
+    pkt.buf.appendInt(u64, nwid) catch unreachable;
+    pkt.buf.appendInt(u8, 0x0c) catch unreachable;
+    try source_mac.appendTo(packet.max_packet_length, &pkt.buf);
+    var dest_mac_bytes: [6]u8 = undefined;
+    dest_group.mac().copyTo(&dest_mac_bytes);
+    pkt.buf.appendBytes(&dest_mac_bytes) catch unreachable;
+    pkt.buf.appendInt(u32, dest_group.adi()) catch unreachable;
+    pkt.buf.appendInt(u16, ethertype_ipv4) catch unreachable;
+    pkt.buf.appendBytes(&payload) catch unreachable;
+
+    var ip = IncomingPacket{
+        .pkt = pkt,
+        .receive_time = 1000,
+        .path = null,
+        .authenticated = true,
+    };
+
+    const result = ip.doMULTICAST_FRAME(&cb, tctx.peer_handle);
+    try testing.expect(result);
+    try testing.expect(tctx.multicast_replicated);
+    try testing.expectEqual(nwid, tctx.multicast_replicated_nwid);
+    try testing.expectEqual(tctx.test_peer_addr, tctx.multicast_replicated_origin);
+    try testing.expectEqual(@as(u32, ethertype_ipv4), tctx.multicast_replicated_ethertype);
+    try testing.expectEqual(@as(u32, payload.len), tctx.multicast_replicated_frame_len);
+    try testing.expect(tctx.multicast_received);
+    try testing.expect(tctx.received_trust);
 }
 
 test "IncomingPacket: doREMOTE_TRACE posts events" {
@@ -3812,7 +4034,7 @@ test "IncomingPacket: doREMOTE_TRACE posts events" {
         .authenticated = true,
     };
 
-    const result = ip.doREMOTE_TRACE(&cb, @ptrCast(&tctx));
+    const result = ip.doREMOTE_TRACE(&cb, tctx.peer_handle);
     try testing.expect(result);
     try testing.expect(tctx.event_posted);
     try testing.expectEqual(@as(u32, c_api.ZT_EVENT_REMOTE_TRACE), tctx.event_type);
@@ -3840,7 +4062,7 @@ test "IncomingPacket: doPATH_NEGOTIATION_REQUEST dispatches" {
         .authenticated = true,
     };
 
-    const result = ip.doPATH_NEGOTIATION_REQUEST(&cb, @ptrCast(&tctx));
+    const result = ip.doPATH_NEGOTIATION_REQUEST(&cb, tctx.peer_handle);
     try testing.expect(result);
     try testing.expect(tctx.path_neg_received);
     try testing.expectEqual(@as(i16, 42), tctx.path_neg_utility);
@@ -3866,7 +4088,7 @@ test "IncomingPacket: doPATH_NEGOTIATION_REQUEST rate limited" {
         .authenticated = true,
     };
 
-    const result = ip.doPATH_NEGOTIATION_REQUEST(&cb, @ptrCast(&tctx));
+    const result = ip.doPATH_NEGOTIATION_REQUEST(&cb, tctx.peer_handle);
     try testing.expect(result);
     try testing.expect(!tctx.path_neg_received);
 }
@@ -3892,7 +4114,7 @@ test "IncomingPacket: doPATH_NEGOTIATION_REQUEST wrong payload size" {
         .authenticated = true,
     };
 
-    const result = ip.doPATH_NEGOTIATION_REQUEST(&cb, @ptrCast(&tctx));
+    const result = ip.doPATH_NEGOTIATION_REQUEST(&cb, tctx.peer_handle);
     try testing.expect(result);
     try testing.expect(!tctx.path_neg_received);
 }
@@ -3917,7 +4139,7 @@ test "IncomingPacket: sendErrorNeedCredentials" {
         .authenticated = true,
     };
 
-    ip.sendErrorNeedCredentials(&cb, @ptrCast(&tctx), 0xDEADBEEF);
+    ip.sendErrorNeedCredentials(&cb, tctx.peer_handle, 0xDEADBEEF);
     try testing.expect(tctx.sent_data_len > 0);
 }
 

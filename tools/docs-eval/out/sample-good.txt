@@ -1,0 +1,10 @@
+Goals: ZeroTea broad parity.
+Verified: test-fast only.
+Untested: broader parity unknown.
+Blocked: none.
+Broken: none.
+Roadmap: ZIG.md
+Command truth: build.zig
+Service README caveat: service/README.md does not prove parity.
+Docs used: CLAUDE.md TESTING.md DEVELOPMENT.md
+Daemon: zerotea

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Automated coding standards checks for ZeroTier Zig port.
+# Automated coding standards checks for ZeroTea.
 # Checks for known anti-patterns from STYLE.md and CODING_STANDARDS.md.
 #
 # Usage: bash lint.sh
@@ -12,7 +12,7 @@ cd "$(dirname "$0")"
 
 ISSUES=0
 
-echo "=== ZeroTier Zig lint ==="
+echo "=== ZeroTea lint ==="
 
 # ── §2.1: catch-return that silently drops (non-error return) ─────
 # "catch return;" or "catch return false/true/0/null" silently drops errors.

@@ -24,7 +24,10 @@ const packet_mod = @import("packet.zig");
 const Packet = packet_mod.Packet;
 const Fragment = packet_mod.Fragment;
 const IncomingPacket = @import("incoming_packet.zig").IncomingPacket;
+const Network = @import("network.zig").Network;
 const InetAddress = @import("inet_address.zig").InetAddress;
+const Path = @import("path.zig").Path;
+const Peer = @import("peer.zig").Peer;
 const MAC = @import("mac.zig").MAC;
 const Mutex = @import("mutex.zig");
 const Hashtable = @import("hashtable.zig").Hashtable;
@@ -362,7 +365,7 @@ pub const Switch = struct {
     pub fn onLocalEthernet(
         self: *Self,
         t_ptr: ?*anyopaque,
-        network: *anyopaque,
+        network: *Network,
         from: *const MAC,
         to: *const MAC,
         ether_type: u32,
@@ -379,7 +382,7 @@ pub const Switch = struct {
         const from_bridged = !from.eql(network_mac);
 
         if (from_bridged) {
-            const my_addr = callbacks.myAddress(t_ptr);
+            const my_addr = callbacks.myAddress(callbacks.ctx);
             if (!callbacks.networkPermitsBridging(network, my_addr)) {
                 return;
             }
@@ -388,7 +391,7 @@ pub const Switch = struct {
         // Compute flow ID for QoS
         const flow_id = computeFlowId(@intCast(ether_type), data[0..len]);
 
-        const my_addr = callbacks.myAddress(t_ptr);
+        const my_addr = callbacks.myAddress(callbacks.ctx);
         const nwid = callbacks.networkId(network);
 
         if (to.isMulticast()) {
@@ -436,13 +439,13 @@ pub const Switch = struct {
         callbacks: *const Callbacks,
     ) void {
         const dest = packet.destination();
-        const my_addr = callbacks.myAddress(t_ptr);
+        const my_addr = callbacks.myAddress(callbacks.ctx);
 
         if (dest.eql(my_addr)) {
             return;
         }
 
-        const now = callbacks.now(t_ptr);
+        const now = callbacks.now(callbacks.ctx);
 
         if (!self.trySend(t_ptr, packet, encrypt, nwid, flow_id, now, callbacks)) {
             // Couldn't send, queue it
@@ -461,7 +464,7 @@ pub const Switch = struct {
             };
 
             // Request WHOIS if we don't know this peer
-            if (callbacks.lookupPeer(t_ptr, dest) == null) {
+            if (callbacks.lookupPeer(callbacks.ctx, dest) == null) {
                 self.requestWhois(t_ptr, now, dest, callbacks);
             }
         }
@@ -518,17 +521,17 @@ pub const Switch = struct {
     pub fn doAnythingWaitingForPeer(
         self: *Self,
         t_ptr: ?*anyopaque,
-        peer: *anyopaque,
+        peer: *Peer,
         callbacks: *const Callbacks,
     ) void {
         const peer_addr = callbacks.peerAddress(peer);
-        const now = callbacks.now(t_ptr);
+        const now = callbacks.now(callbacks.ctx);
 
         // Remove from WHOIS tracking
         {
             self.last_sent_whois_request_mutex.lock();
             defer self.last_sent_whois_request_mutex.unlock();
-            _ = self.last_sent_whois_request.remove(peer_addr);
+            _ = self.last_sent_whois_request.erase(peer_addr);
         }
 
         // Try to decode any RX queue entries waiting for this peer
@@ -536,7 +539,8 @@ pub const Switch = struct {
             rq.lock.lock();
             defer rq.lock.unlock();
             if (rq.timestamp != 0 and rq.complete) {
-                if (rq.frag0.tryDecode(callbacks, rq.flow_id) or safeAge(now, rq.timestamp) > constants.receive_queue_timeout) {
+                const incoming_callbacks = callbacks.createIncomingPacketCallbacks(callbacks.ctx, t_ptr);
+                if (rq.frag0.tryDecode(&incoming_callbacks, rq.flow_id) or safeAge(now, rq.timestamp) > constants.receive_queue_timeout) {
                     rq.timestamp = 0;
                 }
             }
@@ -596,7 +600,7 @@ pub const Switch = struct {
                     _ = self.tx_queue.orderedRemove(i);
                     continue;
                 } else {
-                    if (callbacks.lookupPeer(t_ptr, entry.dest) == null) {
+                    if (callbacks.lookupPeer(callbacks.ctx, entry.dest) == null) {
                         if (need_whois_count < need_whois_buffer.len) {
                             need_whois_buffer[need_whois_count] = entry.dest;
                             need_whois_count += 1;
@@ -613,24 +617,23 @@ pub const Switch = struct {
         }
 
         // Process RX queue entries
-        // TODO: Fix callback type mismatch - needs IncomingPacket.Callbacks not Switch.Callbacks
         for (&self.rx_queue) |*rq| {
             rq.lock.lock();
             defer rq.lock.unlock();
             if (rq.timestamp != 0 and rq.complete) {
-                // Temporarily disabled due to callback type mismatch
-                // Fragment reassembly will be re-enabled after fixing callback conversion
                 if (safeAge(now, rq.timestamp) > constants.receive_queue_timeout) {
                     rq.timestamp = 0;
+                } else {
+                    const incoming_callbacks = callbacks.createIncomingPacketCallbacks(callbacks.ctx, t_ptr);
+                    if (rq.frag0.tryDecode(&incoming_callbacks, rq.flow_id) or (now - rq.timestamp) > constants.receive_queue_timeout) {
+                        rq.timestamp = 0;
+                    } else {
+                        const src = rq.frag0.source();
+                        if (callbacks.lookupPeer(callbacks.ctx, src) == null) {
+                            self.requestWhois(t_ptr, now, src, callbacks);
+                        }
+                    }
                 }
-                // if (rq.frag0.tryDecode(callbacks, rq.flow_id) or (now - rq.timestamp) > constants.receive_queue_timeout) {
-                //     rq.timestamp = 0;
-                // } else {
-                //     const src = rq.frag0.source();
-                //     if (callbacks.lookupPeer(t_ptr, src) == null) {
-                //         self.requestWhois(t_ptr, now, src, callbacks);
-                //     }
-                // }
             }
         }
 
@@ -713,7 +716,7 @@ pub const Switch = struct {
     /// Get next RX queue entry (ring buffer).
     fn nextRXQueueEntry(self: *Self) *RXQueueEntry {
         const idx = self.rx_queue_ptr.increment() - 1;
-        return &self.rx_queue[idx % rx_queue_size];
+        return &self.rx_queue[@intCast(@mod(idx, @as(i32, rx_queue_size)))];
     }
 
     /// Handle a packet fragment.
@@ -827,10 +830,9 @@ pub const Switch = struct {
 
         // Debug: Log packet details
         const verb_names = [_][]const u8{
-            "NOP", "HELLO", "ERROR", "OK", "WHOIS", "RENDEZVOUS",
-            "FRAME", "EXT_FRAME", "ECHO", "MULTICAST_LIKE", "NETWORK_CREDENTIALS",
-            "NETWORK_CONFIG_REQUEST", "NETWORK_CONFIG", "MULTICAST_GATHER",
-            "MULTICAST_FRAME", "PUSH_DIRECT_PATHS", "USER_MESSAGE",
+            "NOP",            "HELLO",            "ERROR",           "OK",                "WHOIS",               "RENDEZVOUS",
+            "FRAME",          "EXT_FRAME",        "ECHO",            "MULTICAST_LIKE",    "NETWORK_CREDENTIALS", "NETWORK_CONFIG_REQUEST",
+            "NETWORK_CONFIG", "MULTICAST_GATHER", "MULTICAST_FRAME", "PUSH_DIRECT_PATHS", "USER_MESSAGE",
         };
         const verb_name = if (verb < verb_names.len) verb_names[verb] else "UNKNOWN";
         std.debug.print("  [PKT] {} bytes: src={x:0>10} dest={x:0>10} verb={s}({d}) cipher={d} flags=0x{x:0>2}\n", .{
@@ -945,12 +947,13 @@ pub const Switch = struct {
     ) bool {
         _ = self;
         _ = nwid;
+        _ = t_ptr;
 
         const dest = packet.destination();
-        const peer = callbacks.lookupPeer(t_ptr, dest) orelse return false;
+        const peer = callbacks.lookupPeer(callbacks.ctx, dest) orelse return false;
 
         // Try to send via peer
-        callbacks.sendViaPeer(t_ptr, peer, packet, encrypt, now, flow_id);
+        callbacks.sendViaPeer(callbacks.ctx, peer, packet, encrypt, now, flow_id);
         return true;
     }
 
@@ -1007,7 +1010,7 @@ pub const Switch = struct {
                     0, 43, 60, 135 => {
                         proto = frame_data[pos];
                         const hdr_len = (@as(u32, frame_data[pos + 1]) * 8) + 8;
-                        if (hdr_len > frame_data.len - pos) break; // prevent overflow
+                        if (hdr_len > frame_data.len - pos) return qos_no_flow; // malformed extension header
                         pos += hdr_len;
                     },
                     else => break,
@@ -1033,7 +1036,7 @@ pub const Switch = struct {
     fn aqmEnqueue(
         self: *Self,
         t_ptr: ?*anyopaque,
-        network: *anyopaque,
+        network: *Network,
         packet: *Packet,
         encrypt: bool,
         nwid: u64,
@@ -1061,27 +1064,27 @@ pub const Callbacks = struct {
     ctx: ?*anyopaque,
 
     // Peer operations
-    lookupPeer: *const fn (ctx: ?*anyopaque, addr: Address) ?*anyopaque,
+    lookupPeer: *const fn (ctx: ?*anyopaque, addr: Address) ?*Peer,
     sendViaPeer: *const fn (
         ctx: ?*anyopaque,
-        peer: *anyopaque,
+        peer: *Peer,
         packet: *const Packet,
         encrypt: bool,
         now: i64,
         flow_id: i32,
     ) void,
-    peerAddress: *const fn (peer: *anyopaque) Address,
+    peerAddress: *const fn (peer: *const Peer) Address,
 
     // Topology operations
     isUpstream: *const fn (ctx: ?*anyopaque, addr: Address) bool,
 
     // Network operations
-    getNetwork: *const fn (ctx: ?*anyopaque, nwid: u64) ?*anyopaque,
-    networkHasConfig: *const fn (network: *anyopaque) bool,
-    networkMac: *const fn (network: *anyopaque) MAC,
-    networkId: *const fn (network: *anyopaque) u64,
-    networkPermitsBridging: *const fn (network: *anyopaque, addr: Address) bool,
-    networkQosEnabled: *const fn (network: *anyopaque) bool,
+    getNetwork: *const fn (ctx: ?*anyopaque, nwid: u64) ?*Network,
+    networkHasConfig: *const fn (network: *const Network) bool,
+    networkMac: *const fn (network: *const Network) MAC,
+    networkId: *const fn (network: *const Network) u64,
+    networkPermitsBridging: *const fn (network: *const Network, addr: Address) bool,
+    networkQosEnabled: *const fn (network: *const Network) bool,
 
     // Address/MAC operations
     myAddress: *const fn (ctx: ?*anyopaque) Address,
@@ -1099,7 +1102,7 @@ pub const Callbacks = struct {
     putFrame: *const fn (
         ctx: ?*anyopaque,
         nwid: u64,
-        network: *anyopaque,
+        network: *Network,
         from: *const MAC,
         to: *const MAC,
         ether_type: u32,
@@ -1109,7 +1112,7 @@ pub const Callbacks = struct {
     ) void,
     multicastSend: *const fn (
         ctx: ?*anyopaque,
-        network: *anyopaque,
+        network: *Network,
         from: *const MAC,
         to: *const MAC,
         ether_type: u32,
@@ -1121,7 +1124,7 @@ pub const Callbacks = struct {
 
     // Path operations
     pathReceived: *const fn (ctx: ?*anyopaque, local_socket: i64, from_addr: *const InetAddress, now: i64) void,
-    getPath: *const fn (ctx: ?*anyopaque, local_socket: i64, from_addr: *const InetAddress) ?*anyopaque,
+    getPath: *const fn (ctx: ?*anyopaque, local_socket: i64, from_addr: *const InetAddress) ?*Path,
 
     // WHOIS operations
     sendWhoisRequest: *const fn (ctx: ?*anyopaque, tptr: ?*anyopaque, packet: *const Packet, now: i64) bool,
@@ -1165,15 +1168,15 @@ test "Switch: WHOIS request tracking" {
     const callbacks = Callbacks{
         .ctx = @ptrCast(&mock_ctx),
         .lookupPeer = struct {
-            fn f(_: ?*anyopaque, _: Address) ?*anyopaque {
+            fn f(_: ?*anyopaque, _: Address) ?*Peer {
                 return null;
             }
         }.f,
         .sendViaPeer = struct {
-            fn f(_: ?*anyopaque, _: *anyopaque, _: *const Packet, _: bool, _: i64, _: i32) void {}
+            fn f(_: ?*anyopaque, _: *Peer, _: *const Packet, _: bool, _: i64, _: i32) void {}
         }.f,
         .peerAddress = struct {
-            fn f(_: *anyopaque) Address {
+            fn f(_: *const Peer) Address {
                 return Address.init(0);
             }
         }.f,
@@ -1183,33 +1186,38 @@ test "Switch: WHOIS request tracking" {
             }
         }.f,
         .getNetwork = struct {
-            fn f(_: ?*anyopaque, _: u64) ?*anyopaque {
+            fn f(_: ?*anyopaque, _: u64) ?*Network {
                 return null;
             }
         }.f,
         .networkHasConfig = struct {
-            fn f(_: *anyopaque) bool {
+            fn f(_: *const Network) bool {
                 return false;
             }
         }.f,
         .networkMac = struct {
-            fn f(_: *anyopaque) MAC {
+            fn f(_: *const Network) MAC {
                 return MAC.init(0);
             }
         }.f,
         .networkId = struct {
-            fn f(_: *anyopaque) u64 {
+            fn f(_: *const Network) u64 {
                 return 0;
             }
         }.f,
         .networkPermitsBridging = struct {
-            fn f(_: *anyopaque, _: Address) bool {
+            fn f(_: *const Network, _: Address) bool {
                 return false;
             }
         }.f,
         .networkQosEnabled = struct {
-            fn f(_: *anyopaque) bool {
+            fn f(_: *const Network) bool {
                 return false;
+            }
+        }.f,
+        .getPath = struct {
+            fn f(_: ?*anyopaque, _: i64, _: *const InetAddress) ?*Path {
+                return null;
             }
         }.f,
         .myAddress = struct {
@@ -1224,7 +1232,7 @@ test "Switch: WHOIS request tracking" {
         }.f,
         .createPacket = struct {
             fn f(_: Address, _: Address, _: u8) Packet {
-                return Packet.init();
+                return Packet.initEmpty();
             }
         }.f,
         .packetAppendNetworkId = struct {
@@ -1242,11 +1250,21 @@ test "Switch: WHOIS request tracking" {
         .packetAppendMAC = struct {
             fn f(_: *Packet, _: *const MAC) void {}
         }.f,
+        .sendWhoisRequest = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: *const Packet, _: i64) bool {
+                return false;
+            }
+        }.f,
+        .createIncomingPacketCallbacks = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque) @import("incoming_packet.zig").Callbacks {
+                @panic("test stub");
+            }
+        }.f,
         .putFrame = struct {
-            fn f(_: ?*anyopaque, _: u64, _: *anyopaque, _: *const MAC, _: *const MAC, _: u32, _: u32, _: [*]const u8, _: u32) void {}
+            fn f(_: ?*anyopaque, _: u64, _: *Network, _: *const MAC, _: *const MAC, _: u32, _: u32, _: [*]const u8, _: u32) void {}
         }.f,
         .multicastSend = struct {
-            fn f(_: ?*anyopaque, _: *anyopaque, _: *const MAC, _: *const MAC, _: u32, _: u32, _: [*]const u8, _: u32, _: bool) void {}
+            fn f(_: ?*anyopaque, _: *Network, _: *const MAC, _: *const MAC, _: u32, _: u32, _: [*]const u8, _: u32, _: bool) void {}
         }.f,
         .pathReceived = struct {
             fn f(_: ?*anyopaque, _: i64, _: *const InetAddress, _: i64) void {}

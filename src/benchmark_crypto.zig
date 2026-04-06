@@ -1,13 +1,12 @@
-/// ZeroTier Zig Selftest
+/// ZeroTea Selftest
 ///
 /// Comprehensive selftest matching the C++ selftest output format.
 /// This allows direct comparison between Zig and C++ implementations.
 ///
 /// Build: zig build selftest -Doptimize=ReleaseFast
-/// Run:   ./zig-out/bin/zerotier-selftest
+/// Run:   ./zig-out/bin/zerotea-selftest
 ///
 /// Compare with C++: ./zerotier-selftest
-
 const std = @import("std");
 const builtin = @import("builtin");
 

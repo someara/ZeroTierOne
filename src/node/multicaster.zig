@@ -236,11 +236,11 @@ pub const Callbacks = struct {
 /// responses. The `send()` method from C++ is decomposed: callers build
 /// OutboundMulticast objects and use `add()` which drains the tx queue.
 pub const Multicaster = struct {
-    /// Groups hashtable: Key -> MulticastGroupStatus.
-    /// Note: MulticastGroupStatus is very large (~5 MB due to the tx queue
-    /// of OutboundMulticast objects, each containing a Packet). The hashtable
-    /// heap-allocates values, so this is fine.
-    groups: Hashtable(Key, MulticastGroupStatus),
+    /// Groups hashtable: Key -> stable MulticastGroupStatus pointer.
+    groups: Hashtable(Key, *MulticastGroupStatus),
+
+    /// Allocator used to own group records.
+    allocator: mem.Allocator,
 
     /// Callbacks for cross-module interactions.
     callbacks: Callbacks,
@@ -250,13 +250,18 @@ pub const Multicaster = struct {
     /// Create a new Multicaster.
     pub fn init(allocator: std.mem.Allocator, callbacks: Callbacks) Multicaster {
         return .{
-            .groups = Hashtable(Key, MulticastGroupStatus).init(allocator),
+            .groups = Hashtable(Key, *MulticastGroupStatus).init(allocator),
+            .allocator = allocator,
             .callbacks = callbacks,
         };
     }
 
     /// Free all resources.
     pub fn deinit(self: *Multicaster) void {
+        var iter = self.groups.iterator();
+        while (iter.next()) |entry| {
+            self.allocator.destroy(entry.value_ptr.*);
+        }
         self.groups.deinit();
     }
 
@@ -280,7 +285,7 @@ pub const Multicaster = struct {
         if (member.eql(my_addr)) return;
 
         const key = Key.init(nwid, mg);
-        const gs: *MulticastGroupStatus = self.groups.getOrPut(key, MulticastGroupStatus.init()) catch return;
+        const gs = self.getOrCreateStatus(key) orelse return;
 
         if (gs.addMember(member, now)) {
             // New member — drain tx queue (matches C++ _add behavior).
@@ -337,7 +342,7 @@ pub const Multicaster = struct {
     pub fn remove(self: *Multicaster, nwid: u64, mg: MulticastGroup, member: Address) void {
         const key = Key.init(nwid, mg);
         if (self.groups.get(key)) |gs| {
-            _ = gs.removeMember(member);
+            _ = gs.*.removeMember(member);
         }
     }
 
@@ -374,7 +379,8 @@ pub const Multicaster = struct {
         buf.addSize(2) catch return 0;
 
         const key = Key.init(nwid, mg);
-        if (self.groups.getCopy(key)) |gs| {
+        if (self.groups.get(key)) |gs_ptr| {
+            const gs = gs_ptr.*;
             if (gs.member_count > 0) {
                 total_known += gs.member_count;
 
@@ -427,7 +433,8 @@ pub const Multicaster = struct {
         limit_val: u32,
     ) u32 {
         const key = Key.init(nwid, mg);
-        if (self.groups.getCopy(key)) |gs| {
+        if (self.groups.get(key)) |gs_ptr| {
+            const gs = gs_ptr.*;
             var count: u32 = 0;
             // Reverse order (most recent last in sorted list -> first in output).
             var i: u32 = gs.member_count;
@@ -454,13 +461,14 @@ pub const Multicaster = struct {
         om: OutboundMulticast,
     ) void {
         const key = Key.init(nwid, mg);
-        const gs: *MulticastGroupStatus = self.groups.getOrPut(key, MulticastGroupStatus.init()) catch return;
+        const gs = self.getOrCreateStatus(key) orelse return;
         gs.pushTx(om);
     }
 
     /// Get the group status for a given (nwid, mg) pair, if it exists.
     pub fn getGroupStatus(self: *Multicaster, nwid: u64, mg: MulticastGroup) ?*MulticastGroupStatus {
-        return self.groups.get(Key.init(nwid, mg));
+        const ptr = self.groups.get(Key.init(nwid, mg)) orelse return null;
+        return ptr.*;
     }
 
     // ── Clean ────────────────────────────────────────────
@@ -478,7 +486,7 @@ pub const Multicaster = struct {
         var iter = self.groups.iterator();
         while (iter.next()) |entry| {
             const k = entry.key_ptr;
-            const gs = entry.value_ptr;
+            const gs = entry.value_ptr.*;
 
             // Clean tx queue: remove expired or at-limit entries.
             var i: u32 = 0;
@@ -513,8 +521,24 @@ pub const Multicaster = struct {
 
         // Erase empty groups.
         for (0..erase_count) |ei| {
-            _ = self.groups.erase(keys_to_erase[ei]);
+            if (self.groups.fetchRemove(keys_to_erase[ei])) |removed| {
+                self.allocator.destroy(removed);
+            }
         }
+    }
+
+    fn getOrCreateStatus(self: *Multicaster, key: Key) ?*MulticastGroupStatus {
+        if (self.groups.get(key)) |existing| {
+            return existing.*;
+        }
+
+        const status = self.allocator.create(MulticastGroupStatus) catch return null;
+        status.* = MulticastGroupStatus.init();
+        const slot = self.groups.getOrPut(key, status) catch {
+            self.allocator.destroy(status);
+            return null;
+        };
+        return slot.*;
     }
 };
 
@@ -674,7 +698,7 @@ test "Multicaster: add creates group and member" {
 
     try testing.expectEqual(@as(u32, 1), mc.groups.count());
 
-    const gs = mc.groups.get(Key.init(0xABCD, mg));
+    const gs = mc.getGroupStatus(0xABCD, mg);
     try testing.expect(gs != null);
     try testing.expectEqual(@as(u32, 1), gs.?.member_count);
     try testing.expect(gs.?.members[0].address.eql(member));
@@ -704,7 +728,7 @@ test "Multicaster: remove" {
     mc.add(null, 1000, 0xABCD, mg, member, null);
     mc.remove(0xABCD, mg, member);
 
-    const gs = mc.groups.get(Key.init(0xABCD, mg));
+    const gs = mc.getGroupStatus(0xABCD, mg);
     try testing.expect(gs != null);
     try testing.expectEqual(@as(u32, 0), gs.?.member_count);
 }
@@ -732,7 +756,7 @@ test "Multicaster: addMultiple" {
 
     mc.addMultiple(null, 1000, 0xABCD, mg, &addrs, 2, null);
 
-    const gs = mc.groups.get(Key.init(0xABCD, mg));
+    const gs = mc.getGroupStatus(0xABCD, mg);
     try testing.expect(gs != null);
     try testing.expectEqual(@as(u32, 2), gs.?.member_count);
 }
@@ -846,7 +870,7 @@ test "Multicaster: clean removes expired members" {
     // Member 2: 1_000_000 - 1_000_000 = 0 < 600000 -> kept.
     mc.clean(1_000_000);
 
-    const gs = mc.groups.get(Key.init(0xABCD, mg));
+    const gs = mc.getGroupStatus(0xABCD, mg);
     try testing.expect(gs != null);
     try testing.expectEqual(@as(u32, 1), gs.?.member_count);
     try testing.expect(gs.?.members[0].address.eql(Address.init(0x0000000002)));
@@ -889,7 +913,7 @@ test "Multicaster: clean keeps group with pending tx" {
 
     // Group should still exist (has pending tx).
     try testing.expectEqual(@as(u32, 1), mc.groups.count());
-    const gs = mc.groups.get(Key.init(0xABCD, mg));
+    const gs = mc.getGroupStatus(0xABCD, mg);
     try testing.expect(gs != null);
     try testing.expectEqual(@as(u32, 0), gs.?.member_count);
     try testing.expectEqual(@as(u32, 1), gs.?.tx_queue_count);
@@ -912,7 +936,7 @@ test "Multicaster: clean removes expired tx entries" {
 
     mc.clean(1_000_000);
 
-    const gs = mc.groups.get(Key.init(0xABCD, mg));
+    const gs = mc.getGroupStatus(0xABCD, mg);
     try testing.expect(gs != null);
     try testing.expectEqual(@as(u32, 0), gs.?.tx_queue_count);
 }
@@ -952,7 +976,7 @@ test "Multicaster: add drains tx queue for new member" {
     // The tx entry had limit 1, so it should have been sent once and removed.
     try testing.expectEqual(@as(u32, 1), Ctx.send_count);
 
-    const gs = mc.groups.get(Key.init(0xABCD, mg));
+    const gs = mc.getGroupStatus(0xABCD, mg);
     try testing.expect(gs != null);
     // Tx queue should be empty after the send hit the limit.
     try testing.expectEqual(@as(u32, 0), gs.?.tx_queue_count);

@@ -103,6 +103,14 @@ pub const HashKey = struct {
     }
 };
 
+// ── PathHandle ────────────────────────────────────────────────────
+
+/// Stable handle for a topology-owned path slot.
+pub const PathHandle = struct {
+    index: u32,
+    generation: u32,
+};
+
 // ── Path ──────────────────────────────────────────────────────────
 
 pub const Path = struct {

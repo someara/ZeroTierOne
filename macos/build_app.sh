@@ -3,7 +3,7 @@ set -e
 
 echo "╔═══════════════════════════════════════════════════════╗"
 echo "║                                                       ║"
-echo "║  Building ZeroTier Tray App Bundle                   ║"
+echo "║  Building ZeroTea Tray App Bundle                    ║"
 echo "║                                                       ║"
 echo "╚═══════════════════════════════════════════════════════╝"
 echo ""
@@ -11,7 +11,7 @@ echo ""
 # Get script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-APP_DIR="$SCRIPT_DIR/ZeroTierTray.app"
+APP_DIR="$SCRIPT_DIR/ZeroTeaTray.app"
 
 cd "$PROJECT_DIR"
 
@@ -19,7 +19,7 @@ cd "$PROJECT_DIR"
 echo "→ Building Zig executable..."
 zig build -Doptimize=ReleaseFast
 
-if [ ! -f "zig-out/bin/ZeroTierTray" ]; then
+if [ ! -f "zig-out/bin/ZeroTeaTray" ]; then
     echo "✗ Build failed - executable not found"
     exit 1
 fi
@@ -31,8 +31,8 @@ echo "→ Creating app bundle..."
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
-cp "zig-out/bin/ZeroTierTray" "$APP_DIR/Contents/MacOS/"
-chmod +x "$APP_DIR/Contents/MacOS/ZeroTierTray"
+cp "zig-out/bin/ZeroTeaTray" "$APP_DIR/Contents/MacOS/"
+chmod +x "$APP_DIR/Contents/MacOS/ZeroTeaTray"
 
 echo "✓ Copied executable"
 

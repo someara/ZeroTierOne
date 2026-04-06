@@ -31,6 +31,7 @@ const pkt = @import("packet.zig");
 const Verb = pkt.Verb;
 const path_mod = @import("path.zig");
 const Path = path_mod.Path;
+const PathHandle = path_mod.PathHandle;
 const sha512 = @import("sha512.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -168,11 +169,13 @@ pub const PeerAttemptToContactAtCallback = *const fn (
 // ── PeerPath ──────────────────────────────────────────────────────
 
 /// A path slot tracked per-peer. Stores a pointer to the Path,
-/// the time of the last valid ZeroTier packet on that path, and
-/// a priority value for cluster redirect support.
+/// the time of the last valid ZeroTier packet on that path, an optional
+/// topology handle, and a priority value for cluster redirect support.
 pub const PeerPath = struct {
     /// Time of last valid ZeroTier packet on this path.
     lr: i64,
+    /// Stable topology handle when the path comes from Topology.
+    handle: ?PathHandle,
     /// Pointer to the path object. null means the slot is empty.
     p: ?*Path,
     /// Priority (>= 1, higher is better). Used for cluster redirects.
@@ -181,6 +184,7 @@ pub const PeerPath = struct {
     pub fn init() PeerPath {
         return .{
             .lr = 0,
+            .handle = null,
             .p = null,
             .priority = 1,
         };
@@ -850,6 +854,7 @@ pub const Peer = struct {
         // Add new path
         if (j < max_peer_network_paths) {
             self._paths[j].lr = now;
+            self._paths[j].handle = null;
             self._paths[j].p = new_path;
             self._paths[j].priority = new_priority;
             j += 1;
@@ -913,6 +918,11 @@ pub const Peer = struct {
     ///
     /// Returns true if the path was added or updated.
     pub fn addPath(self: *Peer, path: *Path, now: i64) bool {
+        return self.addPathWithHandle(path, null, now);
+    }
+
+    /// Add a path and optionally record the topology handle that owns it.
+    pub fn addPathWithHandle(self: *Peer, path: *Path, path_handle: ?PathHandle, now: i64) bool {
         self._paths_m.lock();
         defer self._paths_m.unlock();
 
@@ -921,6 +931,9 @@ pub const Peer = struct {
             if (pp.p) |p| {
                 if (p.address().ipsEqual(path.address()) and p.localSocket() == path.localSocket()) {
                     pp.p = path;
+                    if (path_handle) |h| {
+                        pp.handle = h;
+                    }
                     pp.lr = now;
                     return true;
                 }
@@ -933,6 +946,7 @@ pub const Peer = struct {
         for (&self._paths) |*pp| {
             if (pp.p == null) {
                 pp.p = path;
+                pp.handle = path_handle;
                 pp.lr = now;
                 pp.priority = 1;
                 return true;
@@ -949,6 +963,7 @@ pub const Peer = struct {
             }
         }
         self._paths[oldest_idx].p = path;
+        self._paths[oldest_idx].handle = path_handle;
         self._paths[oldest_idx].lr = now;
         self._paths[oldest_idx].priority = 1;
         return true;
@@ -1246,6 +1261,23 @@ test "Peer: addPath and totalPathCount" {
 
     try testing.expect(peer.addPath(&path2, 1000));
     try testing.expectEqual(@as(u32, 2), peer.totalPathCount());
+}
+
+test "Peer: addPathWithHandle stores handle" {
+    var id_a = try Identity.generate(testing.allocator);
+    var id_b = try Identity.generate(testing.allocator);
+
+    var peer = Peer.create(&id_a, &id_b) orelse return error.SkipZigTest;
+    defer peer.deinit();
+
+    var path = Path.initWithAddress(1, InetAddress.initV4(.{ 1, 2, 3, 4 }, 9993));
+    const handle = PathHandle{ .index = 7, .generation = 11 };
+
+    try testing.expect(peer.addPathWithHandle(&path, handle, 1000));
+    try testing.expectEqual(@as(u32, 1), peer.totalPathCount());
+    try testing.expect(peer._paths[0].handle != null);
+    try testing.expectEqual(handle.index, peer._paths[0].handle.?.index);
+    try testing.expectEqual(handle.generation, peer._paths[0].handle.?.generation);
 }
 
 test "Peer: addPath deduplicates by address" {

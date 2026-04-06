@@ -1,5 +1,5 @@
 #!/bin/sh
-# Test script for ZeroTier Zig service on FreeBSD
+# Test script for ZeroTea service on FreeBSD
 #
 # Tests the FreeBSD TAP device implementation end-to-end
 # Requires: sudo access for TAP device operations
@@ -7,7 +7,7 @@
 set -e
 
 echo "════════════════════════════════════════════════════════"
-echo "  ZeroTier FreeBSD Service Test Suite"
+echo "  ZeroTea FreeBSD Service Test Suite"
 echo "════════════════════════════════════════════════════════"
 echo ""
 
@@ -87,10 +87,10 @@ fi
 # Test 1: Build
 section "Test 1: Build Service"
 # Build the service executable (need -lc for @cImport in constants.zig)
-if zig build-exe src/zerotier_one.zig -I./src -I. -lc --name zerotier-one-test -O Debug > /tmp/zt-build.log 2>&1; then
+if zig build-exe src/zerotea.zig -I./src -I. -lc --name zerotea-test -O Debug > /tmp/zt-build.log 2>&1; then
     pass "Service builds successfully"
     mkdir -p zig-out/bin
-    mv zerotier-one-test zig-out/bin/ 2>/dev/null || true
+    mv zerotea-test zig-out/bin/ 2>/dev/null || true
 else
     fail "Service build failed"
     cat /tmp/zt-build.log
@@ -98,12 +98,12 @@ else
 fi
 
 # Verify binary exists
-if [ -f "./zerotier-one-test" ]; then
-    pass "Binary exists at ./zerotier-one-test"
-    TEST_BINARY="./zerotier-one-test"
-elif [ -f "./zig-out/bin/zerotier-one-test" ]; then
-    pass "Binary exists at ./zig-out/bin/zerotier-one-test"
-    TEST_BINARY="./zig-out/bin/zerotier-one-test"
+if [ -f "./zerotea-test" ]; then
+    pass "Binary exists at ./zerotea-test"
+    TEST_BINARY="./zerotea-test"
+elif [ -f "./zig-out/bin/zerotea-test" ]; then
+    pass "Binary exists at ./zig-out/bin/zerotea-test"
+    TEST_BINARY="./zig-out/bin/zerotea-test"
 else
     fail "Binary not found"
     exit 1

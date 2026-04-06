@@ -1,0 +1,42 @@
+Return a single JSON object.
+
+Required keys:
+
+- `goals`: array of strings
+- `verified`: array of strings
+- `untested`: array of strings
+- `blocked`: array of strings
+- `broken`: array of strings
+- `next`: array of strings
+- `unknowns`: array of strings
+- `roadmap_file`: string
+- `command_truth_file`: string
+- `service_binary`: string
+- `service_readme_parity`: string
+- `support_levels_completion`: string
+- `docs_used`: array of strings
+
+Tasks:
+
+1. State the project goals.
+2. State what is verified right now.
+3. State what is untested, experimental, blocked, broken, or unknown.
+4. State what should be worked on next.
+5. State which file is the Zig roadmap.
+6. State which file is final command truth.
+7. State what binary `zig build service` runs.
+8. State whether Zig parity can be inferred from `service/README.md`.
+9. State whether support levels are completion percentages.
+
+Rules:
+
+- Answer from repository docs only.
+- Read the docs before answering.
+- Do not run builds or tests.
+- Do not infer status from file presence, type names, TODOs, or support levels.
+- Separate `verified`, `untested`, `blocked`, and `broken`.
+- If a fact is not documented, put it in `unknowns`.
+- `roadmap_file` should be a single filename.
+- `command_truth_file` should be a single filename.
+- `service_binary` should be a single binary name.
+- `docs_used` should list the files you actually used.

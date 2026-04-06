@@ -117,13 +117,14 @@ const PathQuality = struct {
 
     /// Calculate overall quality score.
     pub fn calculateQuality(self: *const PathQuality) f32 {
-        // Lower is better for latency/loss/error
-        // Simple scoring: inverse of badness
-        const latency_score = 1.0 / (1.0 + self.latency_mean / 100.0);
+        // Lower is better for latency/loss/error. Use multiplicative
+        // penalties so a single bad metric can meaningfully reduce quality.
+        const latency_score = 1.0 / (1.0 + self.latency_mean / 50.0);
+        const variance_score = 1.0 / (1.0 + self.latency_variance / 1000.0);
         const loss_score = 1.0 - self.packet_loss_ratio;
         const error_score = 1.0 - self.packet_error_ratio;
 
-        return (latency_score + loss_score + error_score) / 3.0;
+        return @max(0.0, latency_score * variance_score * loss_score * error_score);
     }
 };
 
@@ -231,7 +232,7 @@ pub const Bond = struct {
             .reselection_policy = .optimize,
             .in_use = false,
             .active = false,
-            .paths = std.ArrayList(BondedPath).init(allocator),
+            .paths = std.ArrayList(BondedPath){ .items = &.{}, .capacity = 0 },
             .active_path_index = null,
             .primary_path_index = null,
             .rr_index = 0,
@@ -247,7 +248,7 @@ pub const Bond = struct {
 
     /// Destroy the Bond instance.
     pub fn deinit(self: *Self) void {
-        self.paths.deinit();
+        self.paths.deinit(self.allocator);
     }
 
     /// Check if bonding is in use.
@@ -343,7 +344,7 @@ pub const Bond = struct {
         // Add new path
         const mode: LinkMode = if (self.paths.items.len == 0) .primary else .spare;
         const bonded_path = BondedPath.init(path, mode);
-        self.paths.append(bonded_path) catch return;
+        self.paths.append(self.allocator, bonded_path) catch return;
 
         // Set as primary if first
         if (self.paths.items.len == 1) {

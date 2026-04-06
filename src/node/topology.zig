@@ -24,6 +24,7 @@ const IpScope = inet_address.IpScope;
 const Mutex = @import("mutex.zig");
 const path_mod = @import("path.zig");
 const Path = path_mod.Path;
+pub const PathHandle = path_mod.PathHandle;
 const peer_mod = @import("peer.zig");
 const Peer = peer_mod.Peer;
 const world_mod = @import("world.zig");
@@ -60,6 +61,12 @@ pub const min_physmtu: u32 = 510;
 
 /// Maximum physical MTU.
 pub const max_physmtu: u32 = 10000;
+
+/// Stable handle for a peer slot.
+pub const PeerHandle = struct {
+    index: u32,
+    generation: u32,
+};
 
 // ── Persistence Callbacks ────────────────────────────────────────
 
@@ -153,12 +160,14 @@ pub const MoonSeed = struct {
 
 /// A slot in the peer table.
 const PeerEntry = struct {
+    generation: u32,
     addr: Address,
     peer: Peer,
     in_use: bool,
 
     fn init() PeerEntry {
         return .{
+            .generation = 1,
             .addr = Address.zero(),
             .peer = undefined,
             .in_use = false,
@@ -170,12 +179,14 @@ const PeerEntry = struct {
 
 /// A slot in the canonical path table.
 const PathEntry = struct {
+    generation: u32,
     key: path_mod.HashKey,
     path: Path,
     in_use: bool,
 
     fn init() PathEntry {
         return .{
+            .generation = 1,
             .key = path_mod.HashKey.zero(),
             .path = Path.init(),
             .in_use = false,
@@ -317,27 +328,55 @@ pub const Topology = struct {
         self._peers_m.lock();
         defer self._peers_m.unlock();
 
+        const handle = self._addPeerLocked(peer) orelse return null;
+        return self._peerByHandleLocked(handle);
+    }
+
+    /// Add a peer and return a stable handle.
+    pub fn addPeerHandle(self: *Topology, peer: *const Peer) ?PeerHandle {
+        self._peers_m.lock();
+        defer self._peers_m.unlock();
+        return self._addPeerLocked(peer);
+    }
+
+    fn _addPeerLocked(self: *Topology, peer: *const Peer) ?PeerHandle {
         const addr = peer._id.address();
 
         // Check if already present
-        for (self._peers) |*entry| {
+        for (self._peers, 0..) |*entry, i| {
             if (entry.in_use and entry.addr.eql(addr)) {
-                return &entry.peer;
+                return .{ .index = @intCast(i), .generation = entry.generation };
             }
         }
 
         // Find an empty slot
-        for (self._peers) |*entry| {
+        for (self._peers, 0..) |*entry, i| {
             if (!entry.in_use) {
                 entry.addr = addr;
                 entry.peer = peer.*;
                 entry.in_use = true;
                 self._peer_count += 1;
-                return &entry.peer;
+                return .{ .index = @intCast(i), .generation = entry.generation };
             }
         }
 
         return null; // Table full
+    }
+
+    /// Resolve a peer handle to a pointer if still valid.
+    pub fn peerByHandle(self: *Topology, handle: PeerHandle) ?*Peer {
+        self._peers_m.lock();
+        defer self._peers_m.unlock();
+
+        return self._peerByHandleLocked(handle);
+    }
+
+    fn _peerByHandleLocked(self: *Topology, handle: PeerHandle) ?*Peer {
+        const index: usize = @intCast(handle.index);
+        if (index >= self._peers.len) return null;
+        const entry = &self._peers[index];
+        if (!entry.in_use or entry.generation != handle.generation) return null;
+        return &entry.peer;
     }
 
     /// Get a peer by address. Returns null if not found.
@@ -373,6 +412,24 @@ pub const Topology = struct {
         return null;
     }
 
+    /// Get a stable handle for a peer by address.
+    pub fn getPeerHandle(self: *Topology, zta: Address) ?PeerHandle {
+        if (zta.eql(self._my_identity.address())) {
+            return null;
+        }
+
+        self._peers_m.lock();
+        defer self._peers_m.unlock();
+
+        for (self._peers, 0..) |*entry, i| {
+            if (entry.in_use and entry.addr.eql(zta)) {
+                return .{ .index = @intCast(i), .generation = entry.generation };
+            }
+        }
+
+        return null;
+    }
+
     /// Get the identity of a peer by address. Returns null if not found.
     /// If the address matches our own identity, returns our identity.
     pub fn getIdentity(self: *Topology, zta: Address) ?*const Identity {
@@ -400,7 +457,7 @@ pub const Topology = struct {
         for (self._peers) |*entry| {
             if (entry.in_use and entry.addr.eql(zta)) {
                 entry.peer.deinit();
-                entry.in_use = false;
+                self._retirePeerEntry(entry);
                 self._peer_count -= 1;
                 return true;
             }
@@ -453,30 +510,59 @@ pub const Topology = struct {
     /// remote address. Returns a pointer to the path in the table,
     /// or null if the table is full.
     pub fn getPath(self: *Topology, local_socket: i64, remote_addr: *const InetAddress) ?*Path {
-        const key = path_mod.HashKey.init(local_socket, remote_addr);
-
         self._paths_m.lock();
         defer self._paths_m.unlock();
 
+        const handle = self._getPathLocked(local_socket, remote_addr) orelse return null;
+        return self._pathByHandleLocked(handle);
+    }
+
+    /// Get or create a canonical path and return a stable handle.
+    pub fn getPathHandle(self: *Topology, local_socket: i64, remote_addr: *const InetAddress) ?PathHandle {
+        self._paths_m.lock();
+        defer self._paths_m.unlock();
+
+        return self._getPathLocked(local_socket, remote_addr);
+    }
+
+    fn _getPathLocked(self: *Topology, local_socket: i64, remote_addr: *const InetAddress) ?PathHandle {
+        const key = path_mod.HashKey.init(local_socket, remote_addr);
+
         // Look for existing
-        for (self._paths) |*entry| {
+        for (self._paths, 0..) |*entry, i| {
             if (entry.in_use and entry.key.eql(key)) {
-                return &entry.path;
+                return .{ .index = @intCast(i), .generation = entry.generation };
             }
         }
 
         // Create new
-        for (self._paths) |*entry| {
+        for (self._paths, 0..) |*entry, i| {
             if (!entry.in_use) {
                 entry.key = key;
                 entry.path = Path.initWithAddress(local_socket, remote_addr.*);
                 entry.in_use = true;
                 self._path_count += 1;
-                return &entry.path;
+                return .{ .index = @intCast(i), .generation = entry.generation };
             }
         }
 
         return null; // Table full
+    }
+
+    /// Resolve a path handle to a pointer if still valid.
+    pub fn pathByHandle(self: *Topology, handle: PathHandle) ?*Path {
+        self._paths_m.lock();
+        defer self._paths_m.unlock();
+
+        return self._pathByHandleLocked(handle);
+    }
+
+    fn _pathByHandleLocked(self: *Topology, handle: PathHandle) ?*Path {
+        const index: usize = @intCast(handle.index);
+        if (index >= self._paths.len) return null;
+        const entry = &self._paths[index];
+        if (!entry.in_use or entry.generation != handle.generation) return null;
+        return &entry.path;
     }
 
     /// Count of canonical paths.
@@ -652,7 +738,7 @@ pub const Topology = struct {
     /// root entries written.
     pub const RootContact = struct {
         addr: Address,
-        peer: ?*Peer,
+        peer: ?PeerHandle,
         endpoints: [world_mod.max_stable_endpoints_per_root]InetAddress,
         endpoint_count: u32,
     };
@@ -671,7 +757,7 @@ pub const Topology = struct {
         for (planet_roots) |r| {
             if (!r.identity.eql(&self._my_identity) and count < out.len) {
                 out[count].addr = r.identity.address();
-                out[count].peer = self._findPeerLocked(r.identity.address());
+                out[count].peer = self._findPeerHandleLocked(r.identity.address());
                 out[count].endpoint_count = r.endpoint_count;
                 for (0..r.endpoint_count) |j| {
                     out[count].endpoints[j] = r.stable_endpoints[j];
@@ -695,7 +781,7 @@ pub const Topology = struct {
                     }
                     if (!dup) {
                         out[count].addr = r.identity.address();
-                        out[count].peer = self._findPeerLocked(r.identity.address());
+                        out[count].peer = self._findPeerHandleLocked(r.identity.address());
                         out[count].endpoint_count = r.endpoint_count;
                         for (0..r.endpoint_count) |j| {
                             out[count].endpoints[j] = r.stable_endpoints[j];
@@ -970,7 +1056,7 @@ pub const Topology = struct {
                     }
                     if (!is_up) {
                         entry.peer.deinit();
-                        entry.in_use = false;
+                        self._retirePeerEntry(entry);
                         self._peer_count -= 1;
                     }
                 }
@@ -1105,6 +1191,15 @@ pub const Topology = struct {
         return null;
     }
 
+    fn _findPeerHandleLocked(self: *Topology, addr: Address) ?PeerHandle {
+        for (self._peers, 0..) |*entry, i| {
+            if (entry.in_use and entry.addr.eql(addr)) {
+                return .{ .index = @intCast(i), .generation = entry.generation };
+            }
+        }
+        return null;
+    }
+
     /// Memoize upstream addresses from planet + moons.
     /// Assumes _upstreams_m and _peers_m are already locked.
     fn _memoizeUpstreams(self: *Topology) void {
@@ -1202,12 +1297,11 @@ pub const Topology = struct {
                 var i: u32 = 0;
                 while (i < endpoint_count and i < eps.len) : (i += 1) {
                     if (eps[i].port() != 0) {
-                        // Use topology's path table for stable pointer
-                        const stable_path = self.getPath(-1, &eps[i]);
-                        if (stable_path) |p| {
-                            p._last_in = now;
-                            _ = peer.addPath(p, now);
-                        }
+                        // Use topology's path table for a stable path slot.
+                        const path_handle = self.getPathHandle(-1, &eps[i]) orelse continue;
+                        const stable_path = self.pathByHandle(path_handle) orelse continue;
+                        stable_path.received(now);
+                        _ = peer.addPathWithHandle(stable_path, path_handle, now);
                     }
                 }
             }
@@ -1241,6 +1335,13 @@ pub const Topology = struct {
 
         const id_key: [2]u64 = .{ id, 0 };
         delete(self._callbacks.ctx, self._callbacks.t_ptr, object_type, &id_key);
+    }
+
+    fn _retirePeerEntry(self: *Topology, entry: *PeerEntry) void {
+        _ = self;
+        entry.in_use = false;
+        entry.generation +%= 1;
+        if (entry.generation == 0) entry.generation = 1;
     }
 
     /// Remove a moon seed at the given index.

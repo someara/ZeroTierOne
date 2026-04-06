@@ -1,0 +1,33 @@
+{
+  "type": "object",
+  "properties": {
+    "goals": { "type": "array", "items": { "type": "string" } },
+    "verified": { "type": "array", "items": { "type": "string" } },
+    "untested": { "type": "array", "items": { "type": "string" } },
+    "blocked": { "type": "array", "items": { "type": "string" } },
+    "broken": { "type": "array", "items": { "type": "string" } },
+    "next": { "type": "array", "items": { "type": "string" } },
+    "unknowns": { "type": "array", "items": { "type": "string" } },
+    "roadmap_file": { "type": "string" },
+    "command_truth_file": { "type": "string" },
+    "service_binary": { "type": "string" },
+    "service_readme_parity": { "type": "string" },
+    "support_levels_completion": { "type": "string" },
+    "docs_used": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": [
+    "goals",
+    "verified",
+    "untested",
+    "blocked",
+    "broken",
+    "next",
+    "unknowns",
+    "roadmap_file",
+    "command_truth_file",
+    "service_binary",
+    "service_readme_parity",
+    "support_levels_completion",
+    "docs_used"
+  ]
+}

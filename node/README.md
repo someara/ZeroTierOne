@@ -1,14 +1,10 @@
-ZeroTier Network Hypervisor Core
-======
+# ZeroTier Core (`node/`)
 
-This directory contains the *real* ZeroTier: a completely OS-independent global virtual Ethernet switch engine. This is where the magic happens.
+`node/` contains the upstream C++ core library.
 
-Give it wire packets and it gives you Ethernet packets, and vice versa. The core contains absolutely no actual I/O, port configuration, or other OS-specific code (except Utils::getSecureRandom()). It provides a simple C API via [/include/ZeroTierOne.h](../include/ZeroTierOne.h). It's designed to be small and maximally portable for future use on small embedded and special purpose systems.
+- this is the upstream C++ core, not the Zig reimplementation
+- it exposes the stable C API through `include/ZeroTierOne.h`
+- it aims to stay compact and portable
+- it intentionally avoids pulling in broad OS integration work
 
-Code in here follows these guidelines:
-
- - Keep it minimal, especially in terms of code footprint and memory use.
- - There should be no OS-dependent code here unless absolutely necessary (e.g. getSecureRandom).
- - If it's not part of the core virtual Ethernet switch it does not belong here.
- - No C++11 or C++14 since older and embedded compilers don't support it yet and this should be maximally portable.
- - Minimize the use of complex C++ features since at some point we might end up "minus-minus'ing" this code if doing so proves necessary to port to tiny embedded systems.
+If you are working on the Zig effort, the parallel tree is `src/node/` and the canonical overview is `ZIG.md`.

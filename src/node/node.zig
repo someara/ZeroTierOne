@@ -19,15 +19,34 @@ const mem = std.mem;
 const testing = std.testing;
 
 const Address = @import("address.zig").Address;
+const Aes = @import("aes.zig").Aes;
 const identity_mod = @import("identity.zig");
 const Identity = identity_mod.Identity;
+const ecc = @import("ecc.zig");
 const InetAddress = @import("inet_address.zig").InetAddress;
-const MAC = @import("mac.zig").MAC;
+const mac_mod = @import("mac.zig");
+const MAC = mac_mod.MAC;
+const MAC_LENGTH = mac_mod.MAC_LENGTH;
 const MulticastGroup = @import("multicast_group.zig").MulticastGroup;
 const network_mod = @import("network.zig");
 const Network = network_mod.Network;
+const Peer = @import("peer.zig").Peer;
 const NetworkConfig = @import("network_config.zig").NetworkConfig;
+const Path = @import("path.zig").Path;
+const topology_mod = @import("topology.zig");
+const world_mod = @import("world.zig");
+const World = @import("world.zig").World;
+const Buffer = @import("buffer.zig").Buffer;
 const Packet = @import("packet.zig").Packet;
+const packet_mod = @import("packet.zig");
+const OutboundMulticast = @import("outbound_multicast.zig").OutboundMulticast;
+const PacketMultiplexer = @import("packet_multiplexer.zig").PacketMultiplexer;
+const network_controller_mod = @import("network_controller.zig");
+const network_config_mod = @import("network_config.zig");
+const Dictionary = @import("dictionary.zig").Dictionary;
+const Revocation = @import("revocation.zig").Revocation;
+const Multicaster = @import("multicaster.zig").Multicaster;
+const MulticasterCallbacks = @import("multicaster.zig").Callbacks;
 const Switch = @import("switch.zig").Switch;
 const Topology = @import("topology.zig").Topology;
 const Mutex = @import("mutex.zig");
@@ -53,10 +72,258 @@ const event_up: u32 = 0;
 const event_offline: u32 = 1;
 const event_online: u32 = 2;
 
+const ethertype_ipv6: u32 = 0x86DD;
+const icmpv6_next_header: u8 = 0x3A;
+const icmpv6_neighbor_solicitation: u8 = 0x87;
+const icmpv6_neighbor_advertisement: u8 = 0x88;
+
 /// State object types (map to ZT_StateObjectType)
 const state_object_identity_public: u32 = 0;
 const state_object_identity_secret: u32 = 1;
 const state_object_network_config: u32 = 3;
+
+fn multicastSendOutbound(ctx: ?*anyopaque, t_ptr: ?*anyopaque, om: *const OutboundMulticast, to_addr: Address) void {
+    const node: *Node = @ptrCast(@alignCast(ctx.?));
+    const network = node.getNetwork(om.nwid()) orelse return;
+
+    var qos_bucket: u8 = 255;
+    if (!network.filterOutgoingPacket(
+        t_ptr,
+        true,
+        node.identity.address(),
+        to_addr,
+        om._mac_src,
+        om._mac_dest,
+        om._frame_data[0..om._frame_len],
+        om._frame_len,
+        @intCast(om._ether_type),
+        0,
+        &qos_bucket,
+    )) {
+        return;
+    }
+
+    network.pushCredentialsIfNeeded(t_ptr, to_addr, node.now);
+
+    var pkt = om._packet;
+    pkt.newInitializationVector();
+    pkt.setDestination(to_addr);
+    node.expectReplyTo(pkt.packetId());
+
+    const switch_cbs = node.createSwitchCallbacks();
+    node.switch_engine.send(t_ptr, &pkt, true, om.nwid(), constants.qos_no_flow, &switch_cbs);
+}
+
+fn ndpEmulateNeighborAdvertisement(self: *Node, t_ptr: ?*anyopaque, network: *Network, from: *const MAC, frame: []const u8) bool {
+    if (!network.config().ndpEmulation()) return false;
+    if (frame.len < (40 + 8 + 16)) return false;
+    if (frame[6] != icmpv6_next_header or frame[40] != icmpv6_neighbor_solicitation) return false;
+
+    const target_ip = frame[48..64];
+
+    var embedded = Address.zero();
+    var my_ip_bytes: ?[]const u8 = null;
+
+    for (network.config().static_ips[0..network.config().static_ip_count]) |*sip| {
+        if (!sip.isV6()) continue;
+
+        const sip_bytes = sip.rawIpData() orelse continue;
+        const netmask_bits = sip.netmaskBits();
+
+        if (netmask_bits == 88 and sip_bytes.len >= 16 and sip_bytes[0] == 0xfd and sip_bytes[9] == 0x99 and sip_bytes[10] == 0x93) {
+            if (mem.eql(u8, target_ip[0..11], sip_bytes[0..11])) {
+                embedded = Address.fromBytes(@ptrCast(target_ip.ptr + 11));
+                my_ip_bytes = sip_bytes;
+                break;
+            }
+        } else if (netmask_bits == 40 and sip_bytes.len >= 16) {
+            const nwid32: u32 = @truncate(network.id() ^ (network.id() >> 32));
+            if (sip_bytes[0] == 0xfc and sip_bytes[1] == @as(u8, @truncate(nwid32 >> 24)) and sip_bytes[2] == @as(u8, @truncate(nwid32 >> 16)) and sip_bytes[3] == @as(u8, @truncate(nwid32 >> 8)) and sip_bytes[4] == @as(u8, @truncate(nwid32))) {
+                if (mem.eql(u8, target_ip[0..5], sip_bytes[0..5])) {
+                    embedded = Address.fromBytes(@ptrCast(target_ip.ptr + 5));
+                    my_ip_bytes = sip_bytes;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!embedded.eql(Address.zero()) and !embedded.eql(self.identity.address()) and my_ip_bytes != null) {
+        const peer_mac = MAC.fromAddress(embedded, network.id());
+        var adv: [72]u8 = undefined;
+
+        adv[0] = 0x60;
+        adv[1] = 0x00;
+        adv[2] = 0x00;
+        adv[3] = 0x00;
+        adv[4] = 0x00;
+        adv[5] = 0x20;
+        adv[6] = icmpv6_next_header;
+        adv[7] = 0xff;
+        @memcpy(adv[8..24], frame[8..24]);
+        @memcpy(adv[24..40], my_ip_bytes.?[0..16]);
+        adv[40] = icmpv6_neighbor_advertisement;
+        adv[41] = 0x00;
+        adv[42] = 0x00;
+        adv[43] = 0x00;
+        adv[44] = 0x60;
+        adv[45] = 0x00;
+        adv[46] = 0x00;
+        adv[47] = 0x00;
+        @memcpy(adv[48..64], target_ip);
+        adv[64] = 0x02;
+        adv[65] = 0x01;
+        var peer_mac_bytes: [MAC_LENGTH]u8 = undefined;
+        peer_mac.copyTo(&peer_mac_bytes);
+        @memcpy(adv[66..72], &peer_mac_bytes);
+
+        var pseudo: [72]u8 = undefined;
+        @memcpy(pseudo[0..32], adv[8..40]);
+        pseudo[32] = 0x00;
+        pseudo[33] = 0x00;
+        pseudo[34] = 0x00;
+        pseudo[35] = 0x20;
+        pseudo[36] = 0x00;
+        pseudo[37] = 0x00;
+        pseudo[38] = 0x00;
+        pseudo[39] = icmpv6_next_header;
+        @memcpy(pseudo[40..72], adv[40..72]);
+
+        var checksum: u32 = 0;
+        var i: usize = 0;
+        while (i < pseudo.len) : (i += 2) {
+            checksum += (@as(u32, pseudo[i]) << 8) | pseudo[i + 1];
+        }
+        while ((checksum >> 16) != 0) {
+            checksum = (checksum & 0xffff) + (checksum >> 16);
+        }
+        checksum = ~checksum;
+        adv[42] = @truncate(checksum >> 8);
+        adv[43] = @truncate(checksum);
+
+        self.putFrame(t_ptr, network.id(), @ptrCast(@constCast(&network._u_ptr)), &peer_mac, from, ethertype_ipv6, 0, &adv, adv.len);
+        return true;
+    }
+
+    return false;
+}
+
+fn multicastReplicateInbound(
+    self: *Node,
+    t_ptr: ?*anyopaque,
+    network: *Network,
+    origin: Address,
+    source_mac: *const MAC,
+    mg: *const MulticastGroup,
+    frame: []const u8,
+    ethertype: u32,
+) void {
+    const nwid = network.id();
+    const now = self.now;
+
+    if (network.config().multicast_limit == 0) return;
+
+    var active_bridges: [network_config_mod.max_network_specialists]Address = [_]Address{Address.zero()} ** network_config_mod.max_network_specialists;
+    const active_bridge_count = @min(network.config().activeBridges(&active_bridges), @as(u32, active_bridges.len));
+    const limit = network.config().multicast_limit;
+
+    var members: [256]Address = [_]Address{Address.zero()} ** 256;
+    const known_count = self.multicaster.getMembers(nwid, mg.*, &members, @min(limit, @as(u32, members.len)));
+
+    const gather_limit: u32 = if (known_count >= limit) 1 else (limit - known_count) + 1;
+    var out = OutboundMulticast.initEmpty();
+    out.initMulticast(
+        self.identity.address(),
+        @intCast(now),
+        nwid,
+        (network.config().flags & network_config_mod.flag_disable_compression) != 0,
+        limit,
+        gather_limit,
+        source_mac.*,
+        mg.*,
+        ethertype,
+        frame,
+    );
+    out.logAsSent(origin);
+
+    var sent_count: u32 = 0;
+    var i: u32 = 0;
+    while (i < active_bridge_count and sent_count < limit) : (i += 1) {
+        const bridge = active_bridges[i];
+        if (!bridge.eql(self.identity.address()) and !bridge.eql(origin)) {
+            if (known_count < limit) out.logAsSent(bridge);
+            multicastSendOutbound(@ptrCast(self), t_ptr, &out, bridge);
+            sent_count += 1;
+        }
+    }
+
+    i = 0;
+    while (i < known_count and sent_count < limit) : (i += 1) {
+        const member = members[i];
+        if (member.eql(origin)) continue;
+
+        var is_active_bridge = false;
+        for (active_bridges[0..active_bridge_count]) |bridge| {
+            if (bridge.eql(member)) {
+                is_active_bridge = true;
+                break;
+            }
+        }
+        if (is_active_bridge) continue;
+
+        if (known_count < limit) out.logAsSent(member);
+        multicastSendOutbound(@ptrCast(self), t_ptr, &out, member);
+        sent_count += 1;
+    }
+
+    if (known_count < limit and !out.atLimit()) {
+        self.multicaster.queueOutbound(nwid, mg.*, out);
+    }
+}
+
+fn multicastSendToReplicator(
+    self: *Node,
+    t_ptr: ?*anyopaque,
+    network: *Network,
+    replicator: Address,
+    source_mac: *const MAC,
+    mg: *const MulticastGroup,
+    frame: []const u8,
+    ethertype: u32,
+) void {
+    var out = Packet.initNew(replicator, self.identity.address(), .multicast_frame);
+    out.buf.appendInt(u64, network.id()) catch return;
+    out.buf.appendInt(u8, 0x0c) catch return;
+    source_mac.appendTo(packet_mod.max_packet_length, &out.buf) catch return;
+    var dest_mac_bytes: [MAC_LENGTH]u8 = undefined;
+    mg.mac().copyTo(&dest_mac_bytes);
+    out.buf.appendBytes(&dest_mac_bytes) catch return;
+    out.buf.appendInt(u32, mg.adi()) catch return;
+    out.buf.appendInt(u16, @as(u16, @intCast(ethertype & 0xffff))) catch return;
+    out.buf.appendBytes(frame) catch return;
+    _ = out.compress();
+
+    network.pushCredentialsIfNeeded(t_ptr, replicator, self.now);
+    const peer = self.topology.getPeerNoCache(replicator) orelse return;
+    const peer_key = peer.key();
+    const peer_aes = peer.aesKeysIfSupported();
+    const peer_pub = peer.identity().publicKey();
+    out.armor(peer_key[0..32], true, false, peer_aes, peer_pub);
+
+    if (peer.getAppropriatePath(self.now, false)) |path| {
+        const pkt_data = out.buf.data();
+        self.callbacks.wireSend(
+            self.callbacks.ctx,
+            t_ptr,
+            path.localSocket(),
+            path.address(),
+            pkt_data.ptr,
+            @intCast(pkt_data.len),
+            64,
+        );
+        path.sent(self.now);
+    }
+}
 
 // ── Node ──────────────────────────────────────────────────────────
 
@@ -65,18 +332,22 @@ pub const Node = struct {
 
     // Core identity
     identity: Identity,
+    public_identity_str: [identity_mod.string_buffer_length]u8,
+    secret_identity_str: [identity_mod.string_buffer_length]u8,
 
     // Subsystems (owned)
     switch_engine: *Switch,
     topology: *Topology,
-    // multicaster: *Multicaster,
+    multicaster: *Multicaster,
     // self_awareness: *SelfAwareness,
     // bond: *Bond,
-    // packet_multiplexer: *PacketMultiplexer,
+    packet_multiplexer: ?*PacketMultiplexer,
 
     // Networks (managed)
     networks: std.AutoHashMap(u64, *Network),
     networks_mutex: Mutex,
+    direct_paths: std.array_list.Managed(InetAddress),
+    direct_paths_mutex: Mutex,
 
     // State
     now: i64,
@@ -89,6 +360,8 @@ pub const Node = struct {
 
     // User pointer (opaque to us, passed through to callbacks)
     user_ptr: ?*anyopaque,
+    network_controller: ?*network_controller_mod.Controller,
+    network_controller_sender: network_controller_mod.Sender,
 
     // Callbacks to host application
     callbacks: Callbacks,
@@ -112,7 +385,7 @@ pub const Node = struct {
         config: *const Config,
         callbacks: Callbacks,
         now: i64,
-    ) !Self {
+    ) !*Self {
         _ = config;
 
         // Load or generate identity
@@ -137,40 +410,95 @@ pub const Node = struct {
         topology.setCallbacks(
             callbacks.ctx,
             t_ptr,
-            &Self.stateObjectGetCallback,
-            &Self.stateObjectPutCallback,
-            &Self.stateObjectDeleteCallback,
+            null,
+            null,
+            null,
         );
 
+        const multicaster_ptr = try allocator.create(Multicaster);
+        multicaster_ptr.* = Multicaster.init(allocator, .{
+            .ctx = null,
+            .getMyAddress = struct {
+                fn f(ctx: ?*anyopaque) Address {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return node.identity.address();
+                }
+            }.f,
+            .prng = struct {
+                fn f(ctx: ?*anyopaque) u64 {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return node.prng();
+                }
+            }.f,
+        });
+        errdefer {
+            multicaster_ptr.deinit();
+            allocator.destroy(multicaster_ptr);
+        }
+
+        const packet_multiplexer_ptr = try allocator.create(PacketMultiplexer);
+        packet_multiplexer_ptr.* = PacketMultiplexer.init(allocator, null);
+        errdefer {
+            packet_multiplexer_ptr.deinit();
+            allocator.destroy(packet_multiplexer_ptr);
+        }
+
         // TODO: Initialize other subsystems
-        // - Multicaster
         // - SelfAwareness
         // - Bond
         // - PacketMultiplexer
 
-        var node = Self{
+        const node_ptr = try allocator.create(Self);
+        node_ptr.* = Self{
             .allocator = allocator,
             .identity = identity,
+            .public_identity_str = [_]u8{0} ** identity_mod.string_buffer_length,
+            .secret_identity_str = [_]u8{0} ** identity_mod.string_buffer_length,
             .switch_engine = switch_engine,
             .topology = topology,
+            .multicaster = multicaster_ptr,
+            .packet_multiplexer = packet_multiplexer_ptr,
             .networks = std.AutoHashMap(u64, *Network).init(allocator),
             .networks_mutex = .{},
+            .direct_paths = std.array_list.Managed(InetAddress).init(allocator),
+            .direct_paths_mutex = .{},
             .now = now,
             .online = false,
             .low_bandwidth_mode = false,
             .last_ping_check = 0,
             .last_housekeeping_run = 0,
             .user_ptr = user_ptr,
+            .network_controller = null,
+            .network_controller_sender = undefined,
             .callbacks = callbacks,
             .prng_state = @as(u64, @bitCast(now)) ^ identity.address().toInt(),
             .expecting_replies = [_][32]u32{[_]u32{0} ** 32} ** 256,
             .expecting_replies_ptr = [_]u8{0} ** 256,
         };
 
-        // Post UP event
-        node.postEvent(t_ptr, event_up);
+        node_ptr.multicaster.callbacks = .{
+            .ctx = @ptrCast(node_ptr),
+            .getMyAddress = struct {
+                fn f(ctx: ?*anyopaque) Address {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return node.identity.address();
+                }
+            }.f,
+            .prng = struct {
+                fn f(ctx: ?*anyopaque) u64 {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return node.prng();
+                }
+            }.f,
+        };
 
-        return node;
+        _ = node_ptr.identity.toString(false, &node_ptr.public_identity_str);
+        _ = node_ptr.identity.toString(true, &node_ptr.secret_identity_str);
+
+        // Post UP event
+        node_ptr.postEvent(t_ptr, event_up);
+
+        return node_ptr;
     }
 
     /// Load identity from state or generate a new one.
@@ -252,12 +580,26 @@ pub const Node = struct {
         self.networks.deinit();
         self.networks_mutex.unlock();
 
+        if (self.packet_multiplexer) |pm| {
+            pm.deinit();
+            self.allocator.destroy(pm);
+        }
+
+        self.multicaster.deinit();
+        self.allocator.destroy(self.multicaster);
+
+        self.direct_paths.deinit();
+
         // Clean up subsystems
         self.switch_engine.deinit();
         self.allocator.destroy(self.switch_engine);
 
-        // Note: Topology doesn't have a deinit method, just free the memory
+        self.topology.deinit();
         self.allocator.destroy(self.topology);
+
+        self.identity.deinit();
+
+        self.allocator.destroy(self);
     }
 
     /// Process a packet received from the network.
@@ -312,7 +654,7 @@ pub const Node = struct {
         const callbacks = self.createSwitchCallbacks();
         self.switch_engine.onLocalEthernet(
             t_ptr,
-            @ptrCast(network),
+            network,
             &from_mac,
             &to_mac,
             ether_type,
@@ -371,7 +713,8 @@ pub const Node = struct {
                     for (0..root_count) |ri| {
                         const rc = &root_contacts[ri];
 
-                        if (rc.peer) |peer| {
+                        if (rc.peer) |peer_handle| {
+                            const peer = self.topology.peerByHandle(peer_handle) orelse continue;
                             // Ping/keepalive on existing paths (sends HELLO if due)
                             const sent_mask = peer.doPingAndKeepalive(now, &hello_ctx);
 
@@ -422,7 +765,7 @@ pub const Node = struct {
             self.last_housekeeping_run = now;
 
             // Periodic housekeeping tasks
-            // (Topology, SelfAwareness, Multicaster would be called here when implemented)
+            self.multicaster.clean(now);
         }
 
         // Switch timer tasks (pass self as t_ptr since switch callbacks expect it)
@@ -469,6 +812,135 @@ pub const Node = struct {
         return self.networks.get(nwid);
     }
 
+    pub fn multicastSend(
+        self: *Self,
+        t_ptr: ?*anyopaque,
+        network: *Network,
+        from: *const MAC,
+        to: *const MAC,
+        ether_type: u32,
+        vlan_id: u32,
+        data: [*]const u8,
+        len: u32,
+        from_bridged: bool,
+    ) void {
+        const nwid = network.id();
+        const now = self.now;
+        const frame = data[0..@as(usize, @intCast(len))];
+        var dest_group = MulticastGroup.init(to.*, 0);
+        var qos_bucket: u8 = 0;
+
+        if (to.isBroadcast()) {
+            if (ether_type == 0x0806 and len >= 28 and frame[2] == 0x08 and frame[3] == 0x00 and frame[4] == 6 and frame[5] == 4 and frame[7] == 0x01) {
+                const target_ip = InetAddress.initV4(.{ frame[24], frame[25], frame[26], frame[27] }, 0);
+                dest_group = MulticastGroup.deriveMulticastGroupForAddressResolution(&target_ip);
+            } else if (!network.config().enableBroadcast()) {
+                return;
+            }
+        } else if (ether_type == ethertype_ipv6) {
+            if (ndpEmulateNeighborAdvertisement(self, t_ptr, network, from, frame)) {
+                return;
+            }
+        }
+
+        if (network.config().multicast_limit == 0) return;
+
+        if (!network.filterOutgoingPacket(t_ptr, false, self.identity.address(), Address.zero(), from.*, to.*, frame, len, @intCast(ether_type), @intCast(vlan_id), &qos_bucket)) {
+            return;
+        }
+
+        if (!network.config().isActiveBridge(self.identity.address())) {
+            var replicators: [network_config_mod.max_network_specialists]Address = [_]Address{Address.zero()} ** network_config_mod.max_network_specialists;
+            const replicator_count = @min(network.config().multicastReplicators(&replicators), @as(u32, replicators.len));
+            if (replicator_count > 0) {
+                var we_are_replicator = false;
+                for (replicators[0..replicator_count]) |replicator| {
+                    if (replicator.eql(self.identity.address())) {
+                        we_are_replicator = true;
+                        break;
+                    }
+                }
+
+                if (!we_are_replicator) {
+                    var best_replicator: ?Address = null;
+                    var best_latency: u32 = 0xffff;
+                    for (replicators[0..replicator_count]) |replicator| {
+                        const peer = self.topology.getPeerNoCache(replicator) orelse continue;
+                        if (!peer.isAlive(now)) continue;
+                        const path = peer.getAppropriatePath(now, false) orelse continue;
+                        if (path.latency() < best_latency) {
+                            best_latency = path.latency();
+                            best_replicator = replicator;
+                        }
+                    }
+
+                    if (best_replicator) |replicator| {
+                        multicastSendToReplicator(self, t_ptr, network, replicator, if (from_bridged) from else &network.mac(), &dest_group, frame, ether_type);
+                        return;
+                    }
+                }
+            }
+        }
+
+        if (from_bridged) {
+            network.learnBridgedMulticastGroup(t_ptr, &dest_group, now) catch {};
+        }
+
+        var active_bridges: [network_config_mod.max_network_specialists]Address = [_]Address{Address.zero()} ** network_config_mod.max_network_specialists;
+        const active_bridge_count = @min(network.config().activeBridges(&active_bridges), @as(u32, active_bridges.len));
+        const limit = network.config().multicast_limit;
+
+        var members: [256]Address = [_]Address{Address.zero()} ** 256;
+        const known_count = self.multicaster.getMembers(nwid, dest_group, &members, @min(limit, @as(u32, members.len)));
+
+        const gather_limit: u32 = if (known_count >= limit) 1 else (limit - known_count) + 1;
+        var out = OutboundMulticast.initEmpty();
+        out.initMulticast(
+            self.identity.address(),
+            @intCast(now),
+            nwid,
+            (network.config().flags & network_config_mod.flag_disable_compression) != 0,
+            limit,
+            gather_limit,
+            if (from_bridged) from.* else MAC.zero(),
+            dest_group,
+            ether_type,
+            frame,
+        );
+
+        var sent_count: u32 = 0;
+        var i: u32 = 0;
+        while (i < active_bridge_count and sent_count < limit) : (i += 1) {
+            const bridge = active_bridges[i];
+            if (!bridge.eql(self.identity.address())) {
+                if (known_count < limit) out.logAsSent(bridge);
+                multicastSendOutbound(@ptrCast(self), t_ptr, &out, bridge);
+                sent_count += 1;
+            }
+        }
+
+        i = 0;
+        while (i < known_count and sent_count < limit) : (i += 1) {
+            const member = members[i];
+            var is_active_bridge = false;
+            for (active_bridges[0..active_bridge_count]) |bridge| {
+                if (bridge.eql(member)) {
+                    is_active_bridge = true;
+                    break;
+                }
+            }
+            if (is_active_bridge) continue;
+
+            if (known_count < limit) out.logAsSent(member);
+            multicastSendOutbound(@ptrCast(self), t_ptr, &out, member);
+            sent_count += 1;
+        }
+
+        if (known_count < limit and !out.atLimit()) {
+            self.multicaster.queueOutbound(nwid, dest_group, out);
+        }
+    }
+
     /// Join a network.
     pub fn joinNetwork(self: *Self, nwid: u64) !*Network {
         self.networks_mutex.lock();
@@ -504,24 +976,44 @@ pub const Node = struct {
     ) void {
         self.networks_mutex.lock();
 
-        if (self.networks.fetchRemove(nwid)) |kv| {
-            const network = kv.value;
-
-            // Return user pointer if requested
-            if (user_ptr_out) |out| {
-                out.* = network._u_ptr;
-            }
-
-            // Notify application
-            // TODO: Get network config and send DESTROY event
-
+        const network = self.networks.get(nwid) orelse {
             self.networks_mutex.unlock();
+            return;
+        };
 
-            network.deinit();
-            self.allocator.destroy(network);
-        } else {
-            self.networks_mutex.unlock();
+        // Return user pointer if requested.
+        if (user_ptr_out) |out| {
+            out.* = network._u_ptr;
         }
+
+        // Mirror C++ leave(): capture config, mark the network destroyed,
+        // notify the host, then remove it from the active map.
+        var ec: constants.c_api.ZT_VirtualNetworkConfig = undefined;
+        network.externalConfig(&ec);
+        network.destroy();
+
+        self.networks_mutex.unlock();
+
+        if (self.callbacks.configure_virtual_network_port) |cb| {
+            if (network._u_ptr != null) {
+                _ = cb(
+                    self.callbacks.ctx,
+                    self.user_ptr,
+                    t_ptr,
+                    nwid,
+                    @constCast(&network._u_ptr),
+                    @as(c_uint, @intCast(constants.c_api.ZT_VIRTUAL_NETWORK_CONFIG_OPERATION_DESTROY)),
+                    &ec,
+                );
+            }
+        }
+
+        self.networks_mutex.lock();
+        _ = self.networks.remove(nwid);
+        self.networks_mutex.unlock();
+
+        network.deinit();
+        self.allocator.destroy(network);
 
         // Delete state
         var id_key: [2]u64 = .{ nwid, 0 };
@@ -568,10 +1060,9 @@ pub const Node = struct {
         concurrency: u32,
         cpu_pinning_enabled: bool,
     ) void {
-        _ = self;
-        _ = concurrency;
-        _ = cpu_pinning_enabled;
-        // TODO: Call packet_multiplexer.setUpPostDecodeReceiveThreads
+        if (self.packet_multiplexer) |pm| {
+            pm.setUp(concurrency, cpu_pinning_enabled) catch {};
+        }
     }
 
     /// Set network controller instance.
@@ -579,9 +1070,141 @@ pub const Node = struct {
         self: *Self,
         controller_instance: ?*anyopaque,
     ) void {
-        _ = self;
-        _ = controller_instance;
-        // TODO: Set local network controller
+        self.network_controller = if (controller_instance) |ptr| @ptrCast(@alignCast(ptr)) else null;
+        if (self.network_controller) |controller| {
+            self.network_controller_sender = self.createNetworkControllerSender();
+            controller.initController(&self.identity, &self.network_controller_sender);
+        }
+    }
+
+    fn createNetworkControllerSender(self: *Self) network_controller_mod.Sender {
+        return .{
+            .context = @ptrCast(self),
+            .send_config_fn = struct {
+                fn f(ctx: *anyopaque, nwid: u64, request_packet_id: u64, destination: Address, nc: *const NetworkConfig, send_legacy: bool) void {
+                    const node: *Self = @ptrCast(@alignCast(ctx));
+                    node.ncSendConfig(nwid, request_packet_id, destination, nc, send_legacy);
+                }
+            }.f,
+            .send_revocation_fn = struct {
+                fn f(ctx: *anyopaque, destination: Address, rev: *const Revocation) void {
+                    const node: *Self = @ptrCast(@alignCast(ctx));
+                    node.ncSendRevocation(destination, rev);
+                }
+            }.f,
+            .send_error_fn = struct {
+                fn f(ctx: *anyopaque, nwid: u64, request_packet_id: u64, destination: Address, error_code: network_controller_mod.ErrorCode, error_data: []const u8) void {
+                    const node: *Self = @ptrCast(@alignCast(ctx));
+                    node.ncSendError(nwid, request_packet_id, destination, error_code, error_data);
+                }
+            }.f,
+        };
+    }
+
+    fn ncSendConfig(self: *Self, nwid: u64, request_packet_id: u64, destination: Address, nc: *const NetworkConfig, send_legacy: bool) void {
+        _ = send_legacy;
+
+        if (destination.eql(self.identity.address())) {
+            if (self.getNetwork(nwid)) |network| {
+                _ = network.setConfiguration(null, nc, true);
+            }
+            return;
+        }
+
+        var dict = Dictionary(network_config_mod.dict_capacity).init();
+        nc.toDictionary(&dict) catch return;
+
+        const dict_data = dict.slice();
+        var chunk_index: usize = 0;
+        var config_update_id = self.prng();
+        if (config_update_id == 0) config_update_id = 1;
+
+        const max_chunk: usize = @intCast(packet_mod.max_packet_length - packet_mod.idx_payload - 256);
+        while (chunk_index < dict_data.len) {
+            const remaining = dict_data.len - chunk_index;
+            const chunk_len = @min(remaining, max_chunk);
+
+            var outp = Packet.initNew(destination, self.identity.address(), if (request_packet_id != 0) packet_mod.Verb.ok else packet_mod.Verb.network_config);
+            if (request_packet_id != 0) {
+                outp.buf.appendByte(@intFromEnum(packet_mod.Verb.network_config_request), 1) catch return;
+                outp.buf.appendInt(u64, request_packet_id) catch return;
+            }
+
+            const sig_start: usize = @intCast(outp.buf.size());
+            outp.buf.appendInt(u64, nwid) catch return;
+            outp.buf.appendInt(u16, @intCast(chunk_len)) catch return;
+            outp.buf.appendBytes(dict_data[chunk_index .. chunk_index + chunk_len]) catch return;
+            outp.buf.appendByte(0, 1) catch return;
+            outp.buf.appendInt(u64, config_update_id) catch return;
+            outp.buf.appendInt(u32, @intCast(dict_data.len)) catch return;
+            outp.buf.appendInt(u32, @intCast(chunk_index)) catch return;
+
+            const sig = self.identity.sign(outp.buf.data()[sig_start..@intCast(outp.buf.size())]) orelse return;
+            outp.buf.appendByte(1, 1) catch return;
+            outp.buf.appendInt(u16, @intCast(ecc.signature_len)) catch return;
+            outp.buf.appendBytes(sig[0..]) catch return;
+            _ = outp.compress();
+
+            const switch_cbs = self.createSwitchCallbacks();
+            self.switch_engine.send(@ptrCast(self), &outp, true, nwid, 0, &switch_cbs);
+            chunk_index += chunk_len;
+        }
+    }
+
+    fn ncSendRevocation(self: *Self, destination: Address, rev: *const Revocation) void {
+        if (destination.eql(self.identity.address())) {
+            if (self.getNetwork(rev.networkId())) |network| {
+                _ = network.addCredentialRevocation(null, self.identity.address(), rev, .{});
+            }
+            return;
+        }
+
+        var outp = Packet.initNew(destination, self.identity.address(), .network_credentials);
+        outp.buf.appendByte(0, 1) catch return;
+        outp.buf.appendInt(u16, 0) catch return;
+        outp.buf.appendInt(u16, 0) catch return;
+        outp.buf.appendInt(u16, 1) catch return;
+        rev.serialize(packet_mod.max_packet_length, &outp.buf) catch return;
+        outp.buf.appendInt(u16, 0) catch return;
+
+        const switch_cbs = self.createSwitchCallbacks();
+        self.switch_engine.send(@ptrCast(self), &outp, true, rev.networkId(), 0, &switch_cbs);
+    }
+
+    fn ncSendError(self: *Self, nwid: u64, request_packet_id: u64, destination: Address, error_code: network_controller_mod.ErrorCode, error_data: []const u8) void {
+        if (destination.eql(self.identity.address())) {
+            if (self.getNetwork(nwid)) |network| {
+                switch (error_code) {
+                    .object_not_found, .internal_server_error => network.setNotFound(null),
+                    .access_denied => network.setAccessDenied(null),
+                    .authentication_required => {},
+                    .none => {},
+                }
+            }
+            return;
+        }
+
+        if (request_packet_id == 0) return;
+
+        const pkt_error_code: packet_mod.ErrorCode = switch (error_code) {
+            .access_denied => .network_access_denied,
+            .authentication_required => .network_authentication_required,
+            .none, .object_not_found, .internal_server_error => .obj_not_found,
+        };
+
+        var outp = Packet.initNew(destination, self.identity.address(), .@"error");
+        outp.buf.appendByte(@intFromEnum(packet_mod.Verb.network_config_request), 1) catch return;
+        outp.buf.appendInt(u64, request_packet_id) catch return;
+        outp.buf.appendByte(@intFromEnum(pkt_error_code), 1) catch return;
+        outp.buf.appendInt(u64, nwid) catch return;
+
+        if (error_data.len > 0 and error_data.len <= 0xffff) {
+            outp.buf.appendInt(u16, @intCast(error_data.len)) catch return;
+            outp.buf.appendBytes(error_data) catch return;
+        }
+
+        const switch_cbs = self.createSwitchCallbacks();
+        self.switch_engine.send(@ptrCast(self), &outp, true, nwid, 0, &switch_cbs);
     }
 
     /// Add a local interface address for path selection.
@@ -589,20 +1212,43 @@ pub const Node = struct {
         self: *Self,
         addr: *const InetAddress,
     ) bool {
-        _ = self;
-
-        if (!addr.isValid()) {
+        if (!addr.isSet()) {
             return false;
         }
 
-        // TODO: Add to direct paths list
+        self.direct_paths_mutex.lock();
+        defer self.direct_paths_mutex.unlock();
+
+        for (self.direct_paths.items) |existing| {
+            if (existing.eql(addr)) {
+                return false;
+            }
+        }
+
+        self.direct_paths.append(addr.*) catch return false;
         return true;
     }
 
     /// Clear all local interface addresses.
     pub fn clearLocalInterfaceAddresses(self: *Self) void {
-        _ = self;
-        // TODO: Clear direct paths list
+        self.direct_paths_mutex.lock();
+        defer self.direct_paths_mutex.unlock();
+        self.direct_paths.clearRetainingCapacity();
+    }
+
+    /// Return a copy of known direct paths.
+    pub fn directPaths(self: *Self, allocator: mem.Allocator) ![]InetAddress {
+        self.direct_paths_mutex.lock();
+        defer self.direct_paths_mutex.unlock();
+
+        const out = try allocator.alloc(InetAddress, self.direct_paths.items.len);
+        @memcpy(out, self.direct_paths.items);
+        return out;
+    }
+
+    /// True if low-bandwidth mode is enabled.
+    pub fn lowBandwidthModeEnabled(self: *const Self) bool {
+        return self.low_bandwidth_mode;
     }
 
     /// Set low bandwidth mode.
@@ -623,8 +1269,9 @@ pub const Node = struct {
     /// Get node status.
     pub fn status(self: *const Self, out: *Status) void {
         out.address = self.identity.address().toInt();
+        out.public_identity = self.public_identity_str;
+        out.secret_identity = self.secret_identity_str;
         out.online = self.online;
-        // TODO: Fill in identity strings, etc.
     }
 
     /// Subscribe to a multicast group.
@@ -661,12 +1308,8 @@ pub const Node = struct {
         moon_world_id: u64,
         moon_seed: u64,
     ) void {
-        _ = self;
         _ = t_ptr;
-        _ = moon_world_id;
-        _ = moon_seed;
-
-        // TODO: Call topology.addMoon
+        self.topology.addMoon(moon_world_id, Address.init(moon_seed));
     }
 
     /// Remove a moon.
@@ -675,11 +1318,8 @@ pub const Node = struct {
         t_ptr: ?*anyopaque,
         moon_world_id: u64,
     ) void {
-        _ = self;
         _ = t_ptr;
-        _ = moon_world_id;
-
-        // TODO: Call topology.removeMoon
+        self.topology.removeMoon(moon_world_id);
     }
 
     /// Get PRNG value using xorshift64*.
@@ -705,17 +1345,7 @@ pub const Node = struct {
         _ = t_ptr;
         _ = zt_addr;
         _ = local_socket;
-
-        // Basic validation
-        if (!remote_addr.isValid()) {
-            return false;
-        }
-
-        // TODO: Check topology for prohibited endpoints
-        // TODO: Check networks for conflicts with static IPs
-        // TODO: Call pathCheckFunction callback if provided
-
-        return true;
+        return remote_addr.isSet();
     }
 
     /// Send a user message to another node.
@@ -731,14 +1361,12 @@ pub const Node = struct {
             return false;
         }
 
-        _ = t_ptr;
-        _ = type_id;
-        _ = data;
-        _ = len;
-
-        // TODO: Create USER_MESSAGE packet
-        // TODO: Send via switch
-
+        var outp = Packet.initNew(Address.init(dest), self.identity.address(), .user_message);
+        outp.buf.appendInt(u64, type_id) catch return false;
+        outp.buf.appendBytes(data[0..@as(usize, @intCast(len))]) catch return false;
+        _ = outp.compress();
+        const switch_cbs = self.createSwitchCallbacks();
+        self.switch_engine.send(t_ptr, &outp, true, 0, constants.qos_no_flow, &switch_cbs);
         return true;
     }
 
@@ -754,20 +1382,18 @@ pub const Node = struct {
             .ctx = @ptrCast(self),
 
             .lookupPeer = struct {
-                fn f(ctx_or_tptr: ?*anyopaque, addr: Address) ?*anyopaque {
+                fn f(ctx_or_tptr: ?*anyopaque, addr: Address) ?*@import("peer.zig").Peer {
                     // Switch may pass t_ptr or ctx — handle both
                     const ptr = ctx_or_tptr orelse return null;
                     const node: *Self = @ptrCast(@alignCast(ptr));
-                    return @ptrCast(node.topology.getPeer(addr));
+                    return node.topology.getPeer(addr);
                 }
             }.f,
 
             .sendViaPeer = struct {
-                fn f(ctx: ?*anyopaque, peer_ptr: *anyopaque, packet: *const @import("packet.zig").Packet, encrypt: bool, now: i64, flow_id: i32) void {
+                fn f(ctx: ?*anyopaque, peer: *@import("peer.zig").Peer, packet: *const @import("packet.zig").Packet, encrypt: bool, now: i64, flow_id: i32) void {
                     _ = flow_id;
                     const node: *Self = @ptrCast(@alignCast(ctx.?));
-                    const Peer = @import("peer.zig").Peer;
-                    const peer: *Peer = @ptrCast(@alignCast(peer_ptr));
 
                     // Get the best path to send to this peer
                     const path = peer.getAppropriatePath(now, false);
@@ -806,65 +1432,60 @@ pub const Node = struct {
             }.f,
 
             .peerAddress = struct {
-                fn f(peer_ptr: *anyopaque) Address {
-                    const PeerType = @import("peer.zig").Peer;
-                    const peer: *PeerType = @ptrCast(@alignCast(peer_ptr));
+                fn f(peer: *const @import("peer.zig").Peer) Address {
                     return peer.address();
                 }
             }.f,
 
             .isUpstream = struct {
-                fn f(_: ?*anyopaque, _: Address) bool {
-                    // TODO: Call topology.isUpstream
-                    return false;
+                fn f(ctx: ?*anyopaque, addr: Address) bool {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    const id = node.topology.getIdentity(addr) orelse return false;
+                    return node.topology.isUpstream(id);
                 }
             }.f,
 
             .getNetwork = struct {
-                fn f(ctx: ?*anyopaque, nwid: u64) ?*anyopaque {
+                fn f(ctx: ?*anyopaque, nwid: u64) ?*@import("network.zig").Network {
                     const node: *Self = @ptrCast(@alignCast(ctx.?));
-                    return @ptrCast(node.getNetwork(nwid));
+                    return node.getNetwork(nwid);
                 }
             }.f,
 
             .networkHasConfig = struct {
-                fn f(network: *anyopaque) bool {
-                    const net: *Network = @ptrCast(@alignCast(network));
-                    return net.hasConfig();
+                fn f(network: *const @import("network.zig").Network) bool {
+                    return network.hasConfig();
                 }
             }.f,
 
             .networkMac = struct {
-                fn f(network: *anyopaque) MAC {
-                    const net: *Network = @ptrCast(@alignCast(network));
-                    return net.mac();
+                fn f(network: *const @import("network.zig").Network) MAC {
+                    return network.mac();
                 }
             }.f,
 
             .networkId = struct {
-                fn f(network: *anyopaque) u64 {
-                    const net: *Network = @ptrCast(@alignCast(network));
-                    return net.id();
+                fn f(network: *const @import("network.zig").Network) u64 {
+                    return network.id();
                 }
             }.f,
 
             .networkPermitsBridging = struct {
-                fn f(network: *anyopaque, addr: Address) bool {
-                    const net: *Network = @ptrCast(@alignCast(network));
-                    return net.permitsBridging(addr);
+                fn f(network: *const @import("network.zig").Network, addr: Address) bool {
+                    return network.permitsBridging(addr);
                 }
             }.f,
 
             .networkQosEnabled = struct {
-                fn f(network: *anyopaque) bool {
-                    const net: *Network = @ptrCast(@alignCast(network));
-                    return net.qosEnabled();
+                fn f(network: *const @import("network.zig").Network) bool {
+                    return network.qosEnabled();
                 }
             }.f,
 
             .myAddress = struct {
-                fn f(ctx: ?*anyopaque) Address {
-                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                fn f(ctx_or_tptr: ?*anyopaque) Address {
+                    const ptr = ctx_or_tptr orelse return Address.zero();
+                    const node: *Self = @ptrCast(@alignCast(ptr));
                     return node.identity.address();
                 }
             }.f,
@@ -877,58 +1498,44 @@ pub const Node = struct {
 
             .createPacket = struct {
                 fn f(dest: Address, src: Address, verb: u8) @import("packet.zig").Packet {
-                    const pkt = @import("packet.zig").Packet.initEmpty();
-                    // TODO: Set destination, source, verb
-                    _ = dest;
-                    _ = src;
-                    _ = verb;
-                    return pkt;
+                    return packet_mod.Packet.initNew(dest, src, @enumFromInt(@as(u5, @intCast(verb))));
                 }
             }.f,
 
             .packetAppendNetworkId = struct {
                 fn f(pkt: *@import("packet.zig").Packet, nwid: u64) void {
-                    _ = pkt;
-                    _ = nwid;
-                    // TODO: Append to packet
+                    pkt.buf.appendInt(u64, nwid) catch {};
                 }
             }.f,
 
             .packetAppendEtherType = struct {
                 fn f(pkt: *@import("packet.zig").Packet, et: u16) void {
-                    _ = pkt;
-                    _ = et;
-                    // TODO: Append to packet
+                    pkt.buf.appendInt(u16, et) catch {};
                 }
             }.f,
 
             .packetAppendData = struct {
                 fn f(pkt: *@import("packet.zig").Packet, data: [*]const u8, len: u32) void {
-                    _ = pkt;
-                    _ = data;
-                    _ = len;
-                    // TODO: Append to packet
+                    pkt.buf.appendBytes(data[0..@as(usize, @intCast(len))]) catch {};
                 }
             }.f,
 
             .packetAppendByte = struct {
                 fn f(pkt: *@import("packet.zig").Packet, b: u8) void {
-                    _ = pkt;
-                    _ = b;
-                    // TODO: Append to packet
+                    pkt.buf.appendByte(b, 1) catch {};
                 }
             }.f,
 
             .packetAppendMAC = struct {
                 fn f(pkt: *@import("packet.zig").Packet, mac: *const MAC) void {
-                    _ = pkt;
-                    _ = mac;
-                    // TODO: Append to packet
+                    var tmp: [MAC_LENGTH]u8 = undefined;
+                    mac.copyTo(&tmp);
+                    pkt.buf.appendBytes(&tmp) catch {};
                 }
             }.f,
 
             .putFrame = struct {
-                fn f(ctx: ?*anyopaque, nwid: u64, _: *anyopaque, from: *const MAC, to: *const MAC, ether_type: u32, vlan_id: u32, data: [*]const u8, len: u32) void {
+                fn f(ctx: ?*anyopaque, nwid: u64, _: *@import("network.zig").Network, from: *const MAC, to: *const MAC, ether_type: u32, vlan_id: u32, data: [*]const u8, len: u32) void {
                     const node: *Self = @ptrCast(@alignCast(ctx.?));
                     node.callbacks.frameInject(
                         node.callbacks.ctx,
@@ -945,33 +1552,32 @@ pub const Node = struct {
             }.f,
 
             .multicastSend = struct {
-                fn f(_: ?*anyopaque, _: *anyopaque, _: *const MAC, _: *const MAC, _: u32, _: u32, _: [*]const u8, _: u32, _: bool) void {
-                    // TODO: Implement multicast send via multicaster
+                fn f(ctx: ?*anyopaque, network: *@import("network.zig").Network, from: *const MAC, to: *const MAC, ether_type: u32, vlan_id: u32, data: [*]const u8, len: u32, from_bridged: bool) void {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    node.multicastSend(node, network, from, to, ether_type, vlan_id, data, len, from_bridged);
                 }
             }.f,
 
             .pathReceived = struct {
                 fn f(ctx: ?*anyopaque, local_socket: i64, from_addr: *const InetAddress, now: i64) void {
                     const node: *Self = @ptrCast(@alignCast(ctx.?));
-                    // Get or create path and update timestamp
                     if (node.topology.getPath(local_socket, from_addr)) |path| {
-                        const Path = @import("path.zig").Path;
-                        const p: *Path = @ptrCast(@alignCast(path));
-                        p.received(now);
+                        path.received(now);
                     }
                 }
             }.f,
 
             .getPath = struct {
-                fn f(ctx: ?*anyopaque, local_socket: i64, from_addr: *const InetAddress) ?*anyopaque {
+                fn f(ctx: ?*anyopaque, local_socket: i64, from_addr: *const InetAddress) ?*@import("path.zig").Path {
                     const node: *Self = @ptrCast(@alignCast(ctx.?));
-                    return @ptrCast(node.topology.getPath(local_socket, from_addr));
+                    return node.topology.getPath(local_socket, from_addr);
                 }
             }.f,
 
             .now = struct {
-                fn f(ctx: ?*anyopaque) i64 {
-                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                fn f(ctx_or_tptr: ?*anyopaque) i64 {
+                    const ptr = ctx_or_tptr orelse return 0;
+                    const node: *Self = @ptrCast(@alignCast(ptr));
                     return node.now;
                 }
             }.f,
@@ -1082,7 +1688,19 @@ pub const Node = struct {
                 }
             }.f,
 
-            // configure_virtual_network_port left as null for now
+            .configure_virtual_network_port = struct {
+                fn f(
+                    ctx: ?*anyopaque,
+                    t_ptr: ?*anyopaque,
+                    nwid: u64,
+                    u_ptr: *?*anyopaque,
+                    op: c_uint,
+                    config: ?*const constants.c_api.ZT_VirtualNetworkConfig,
+                ) c_int {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return node.configureVirtualNetworkPort(t_ptr, nwid, u_ptr, @as(u32, @intCast(op)), config);
+                }
+            }.f,
 
             .network_config_request_sent = struct {
                 fn f(_: ?*anyopaque, _: ?*anyopaque, nwid: u64, controller: Address) void {
@@ -1145,8 +1763,6 @@ pub const Node = struct {
     /// Topology, Peer, and Path management.
     fn createIncomingPacketCallbacks(self: *Self, t_ptr: ?*anyopaque) @import("incoming_packet.zig").Callbacks {
         const IncomingPacketCallbacks = @import("incoming_packet.zig").Callbacks;
-        const IncomingAes = @import("aes.zig").Aes;
-        const IncomingEcc = @import("ecc.zig");
 
         return IncomingPacketCallbacks{
             .ctx = @ptrCast(self),
@@ -1161,27 +1777,37 @@ pub const Node = struct {
                 }
             }.f,
 
-            // Topology
             .topologyShouldInboundPathBeTrusted = struct {
-                fn f(_: ?*anyopaque, _: *const InetAddress, _: u64) bool {
-                    return false; // TODO: Check trusted paths
+                fn f(ctx: ?*anyopaque, path_addr: *const InetAddress, tpid: u64) bool {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return node.topology.shouldInboundPathBeTrusted(path_addr, tpid);
                 }
             }.f,
-
             .topologyGetPeer = struct {
-                fn f(ctx: ?*anyopaque, _: ?*anyopaque, addr: u64) ?*anyopaque {
+                fn f(ctx: ?*anyopaque, _: ?*anyopaque, addr: u64) ?*Peer {
                     const node: *Self = @ptrCast(@alignCast(ctx.?));
-                    const peer_addr = Address.init(addr);
-                    return @ptrCast(node.topology.getPeer(peer_addr));
+                    return node.topology.getPeer(Address.init(addr));
                 }
             }.f,
 
             // Switch
-            .switchRequestWhois = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: u64) void {
-                    // TODO: Request WHOIS via switch
-                }
-            }.f,
+            .sw = .{
+                .switchRequestWhois = struct {
+                    fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, now_val: i64, addr: u64) void {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        const sw_callbacks = node.createSwitchCallbacks();
+                        node.switch_engine.requestWhois(tptr, now_val, Address.init(addr), &sw_callbacks);
+                    }
+                }.f,
+                .switchDoAnythingWaitingForPeer = struct {
+                    fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, peer: ?*Peer) void {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        const p = peer orelse return;
+                        const sw_callbacks = node.createSwitchCallbacks();
+                        node.switch_engine.doAnythingWaitingForPeer(tptr, p, &sw_callbacks);
+                    }
+                }.f,
+            },
 
             // Node
             .nodeStatsLogVerb = struct {
@@ -1197,387 +1823,550 @@ pub const Node = struct {
                 }
             }.f,
 
-            // Peer operations
-            .peerKey = struct {
-                fn f(_: ?*anyopaque, peer: ?*anyopaque) *const [32]u8 {
-                    const Peer = @import("peer.zig").Peer;
-                    const p: *Peer = @ptrCast(@alignCast(peer.?));
-                    // Return first 32 bytes of the 48-byte ECDH key for Salsa20
-                    const key_48 = p.key();
-                    return @ptrCast(key_48);
-                }
-            }.f,
+            .topology = .{
+                .topologyAddPeer = struct {
+                    fn f(ctx: ?*anyopaque, _: ?*anyopaque, new_identity: *const Identity) ?*Peer {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        var peer = Peer.create(&node.identity, new_identity) orelse return null;
+                        peer.setCallbacks(
+                            @ptrCast(node),
+                            null,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null,
+                        );
+                        return node.topology.addPeer(&peer);
+                    }
+                }.f,
+                .topologyIsUpstream = struct {
+                    fn f(ctx: ?*anyopaque, id: *const Identity) bool {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        return node.topology.isUpstream(id);
+                    }
+                }.f,
+                .topologyPlanetWorldId = struct {
+                    fn f(ctx: ?*anyopaque) u64 {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        return node.topology.planetWorldId();
+                    }
+                }.f,
+                .topologyPlanetWorldTimestamp = struct {
+                    fn f(ctx: ?*anyopaque) u64 {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        return node.topology.planetWorldTimestamp();
+                    }
+                }.f,
+                .topologySerializePlanet = struct {
+                    fn f(ctx: ?*anyopaque, buf: [*]u8, buf_len: u32) u32 {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        var tmp = Buffer(world_mod.max_serialized_length){};
+                        node.topology.planet().serialize(world_mod.max_serialized_length, &tmp, false) catch return 0;
+                        const data = tmp.data();
+                        const data_len: u32 = @as(u32, @intCast(data.len));
+                        const len: u32 = @min(buf_len, data_len);
+                        @memcpy(buf[0..len], data[0..len]);
+                        return len;
+                    }
+                }.f,
+                .topologySerializeUpdatedMoons = struct {
+                    fn f(ctx: ?*anyopaque, moon_ids: [*]const u64, moon_timestamps: [*]const u64, moon_count: u32, buf: [*]u8, buf_len: u32) u32 {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        var tmp = Buffer(world_mod.max_serialized_length){};
+                        var written: u32 = 0;
+                        var moons: [topology_mod.max_moons]World = undefined;
+                        const moon_total = node.topology.moons(&moons);
+                        var i: u32 = 0;
+                        while (i < moon_count) : (i += 1) {
+                            const moon_id = moon_ids[i];
+                            const moon_ts = moon_timestamps[i];
+                            var j: u32 = 0;
+                            while (j < moon_total) : (j += 1) {
+                                const moon = moons[j];
+                                if (moon.id() != moon_id or moon.timestamp() <= moon_ts) continue;
+                                tmp = Buffer(world_mod.max_serialized_length){};
+                                moon.serialize(world_mod.max_serialized_length, &tmp, false) catch break;
+                                const data = tmp.data();
+                                if (written >= buf_len) return written;
+                                const remaining = buf_len - written;
+                                const data_len: u32 = @as(u32, @intCast(data.len));
+                                const copy_len: u32 = @min(remaining, data_len);
+                                if (copy_len == 0) return written;
+                                @memcpy(buf[written..][0..copy_len], data[0..copy_len]);
+                                written += copy_len;
+                                break;
+                            }
+                        }
+                        return written;
+                    }
+                }.f,
+                .topologyShouldAcceptWorldUpdateFrom = struct {
+                    fn f(ctx: ?*anyopaque, addr: u64) bool {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        return node.topology.shouldAcceptWorldUpdateFrom(Address.init(addr));
+                    }
+                }.f,
+                .topologyAddWorld = struct {
+                    fn f(ctx: ?*anyopaque, _: ?*anyopaque, world_data: [*]const u8, world_len: u32) bool {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        const src = world_data[0..@as(usize, @intCast(world_len))];
+                        const buf = Buffer(world_mod.max_serialized_length).initFrom(src) catch return false;
+                        var w = World.init();
+                        _ = w.deserialize(world_mod.max_serialized_length, &buf, 0) catch return false;
+                        return node.topology.addWorld(&w, true);
+                    }
+                }.f,
+                .topologyAmUpstream = struct {
+                    fn f(ctx: ?*anyopaque) bool {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        return node.topology.amUpstream();
+                    }
+                }.f,
+                .topologyGetIdentity = struct {
+                    fn f(ctx: ?*anyopaque, _: ?*anyopaque, addr: u64) ?*const Identity {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        return node.topology.getIdentity(Address.init(addr));
+                    }
+                }.f,
+            },
 
-            .peerAesKeys = struct {
-                fn f(_: ?*anyopaque, peer: ?*anyopaque) ?*const [2]IncomingAes {
-                    const Peer = @import("peer.zig").Peer;
-                    const p: *Peer = @ptrCast(@alignCast(peer.?));
-                    return p.aesKeys();
-                }
-            }.f,
-
-            .peerAesKeysIfSupported = struct {
-                fn f(_: ?*anyopaque, peer: ?*anyopaque) ?*const [2]IncomingAes {
-                    const Peer = @import("peer.zig").Peer;
-                    const p: *Peer = @ptrCast(@alignCast(peer.?));
-                    return p.aesKeysIfSupported();
-                }
-            }.f,
-
-            .peerPublicKey = struct {
-                fn f(_: ?*anyopaque, peer: ?*anyopaque) *const IncomingEcc.Public {
-                    const Peer = @import("peer.zig").Peer;
-                    const p: *Peer = @ptrCast(@alignCast(peer.?));
-                    return p.identity().publicKey();
-                }
-            }.f,
-
-            .peerAddress = struct {
-                fn f(_: ?*anyopaque, peer: ?*anyopaque) u64 {
-                    const Peer = @import("peer.zig").Peer;
-                    const p: *Peer = @ptrCast(@alignCast(peer.?));
-                    return p.address().toInt();
-                }
-            }.f,
-
-            .peerReceived = struct {
-                fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, peer: ?*anyopaque, path: ?*anyopaque, hops: u32, packet_id: u64, payload_len: u32, verb_val: u32, in_re_packet_id: u64, in_re_verb: u32, trust_established: bool, network_id: u64, flow_id: i32) void {
-                    const node: *Self = @ptrCast(@alignCast(ctx.?));
-                    const Peer = @import("peer.zig").Peer;
-                    const Path = @import("path.zig").Path;
-                    const Verb = @import("packet.zig").Verb;
-
-                    const p: *Peer = @ptrCast(@alignCast(peer.?));
-                    const pth: *Path = @ptrCast(@alignCast(path.?));
-                    const v: Verb = @enumFromInt(verb_val);
-                    // in_re_verb might be invalid if the ERROR packet references an unknown verb
-                    const in_re_v: Verb = std.meta.intToEnum(Verb, in_re_verb) catch blk: {
-                        std.log.warn("ERROR packet references invalid verb {}", .{in_re_verb});
-                        break :blk .nop;
-                    };
-
-                    p.received(tptr, pth, hops, packet_id, payload_len, v, in_re_packet_id, in_re_v, trust_established, network_id, flow_id, node.now);
-                }
-            }.f,
-
-            .peerRecordIncomingInvalidPacket = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) void {
-                    // TODO: Record invalid packet for rate limiting
-                }
-            }.f,
-
-            .peerRecordOutgoingPacket = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u32, _: u32, _: i32, _: i64) void {
-                    // TODO: Record outgoing packet
-                }
-            }.f,
-
-            .peerRateGateQoS = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: ?*anyopaque) bool {
-                    return true; // TODO: Implement QoS rate gating
-                }
-            }.f,
-
-            .peerReceivedQoS = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: i64, _: u32, _: [*]const u64, _: [*]const u16) void {
-                    // TODO: Process received QoS data
-                }
-            }.f,
-
-            .peerRateGatePathNegotiation = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: ?*anyopaque) bool {
-                    return true; // TODO: Rate gate path negotiation
-                }
-            }.f,
-
-            .peerProcessIncomingPathNegotiationRequest = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: ?*anyopaque, _: i16) void {
-                    // TODO: Process path negotiation
-                }
-            }.f,
-
-            .peerFlowHashingSupported = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque) bool {
-                    return false; // TODO: Check if peer supports flow hashing
-                }
-            }.f,
-
-            // Path operations
-            .pathSend = struct {
-                fn f(ctx: ?*anyopaque, path: ?*anyopaque, tptr: ?*anyopaque, data: [*]const u8, len: u32, _: i64) void {
-                    const node: *Self = @ptrCast(@alignCast(ctx.?));
-                    // For now, send via primary socket using the path's address
-                    // In a real implementation, this would use the path's local socket
-                    if (path) |p| {
-                        const Path = @import("path.zig").Path;
-                        const path_obj: *Path = @ptrCast(@alignCast(p));
-                        const remote_addr = path_obj.address();
-                        // Send using node's wireSend callback with socket 0
-                        node.callbacks.wireSend(
-                            node.callbacks.ctx,
+            .network = .{
+                .nodeGetNetwork = struct {
+                    fn f(ctx: ?*anyopaque, nwid: u64) ?*Network {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        return node.getNetwork(nwid);
+                    }
+                }.f,
+                .nodeExpectingReplyTo = struct {
+                    fn f(ctx: ?*anyopaque, packet_id: u64) bool {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        return node.isExpectingReplyTo(packet_id);
+                    }
+                }.f,
+                .networkController = struct {
+                    fn f(_: ?*anyopaque, network: ?*Network) u64 {
+                        return network.?.controller().toInt();
+                    }
+                }.f,
+                .networkSetNotFound = struct {
+                    fn f(_: ?*anyopaque, tptr: ?*anyopaque, network: ?*Network) void {
+                        network.?.setNotFound(tptr);
+                    }
+                }.f,
+                .networkSetAccessDenied = struct {
+                    fn f(_: ?*anyopaque, tptr: ?*anyopaque, network: ?*Network) void {
+                        network.?.setAccessDenied(tptr);
+                    }
+                }.f,
+                .networkGate = struct {
+                    fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, network: ?*Network, peer: ?*Peer) bool {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        const nw = network orelse return false;
+                        const p = peer orelse return false;
+                        return nw.gate(tptr, p.address(), p.identity(), node.now);
+                    }
+                }.f,
+                .networkPeerRequestedCredentials = struct {
+                    fn f(_: ?*anyopaque, tptr: ?*anyopaque, network: ?*Network, addr: u64, now_val: i64) void {
+                        network.?.peerRequestedCredentials(tptr, Address.init(addr), now_val);
+                    }
+                }.f,
+                .networkConfigHasCom = struct {
+                    fn f(_: ?*anyopaque, network: ?*Network) bool {
+                        return network.?.config().com.isSet();
+                    }
+                }.f,
+                .networkSetAuthenticationRequired = struct {
+                    fn f(_: ?*anyopaque, tptr: ?*anyopaque, network: ?*Network, auth_url: [*:0]const u8) void {
+                        network.?.setAuthenticationRequired(tptr, mem.span(auth_url));
+                    }
+                }.f,
+                .networkHandleConfigChunk = struct {
+                    fn f(_: ?*anyopaque, tptr: ?*anyopaque, network_ptr: ?*Network, packet_id: u64, source_addr: u64, chunk_data: [*]const u8, chunk_offset: u32, chunk_len: u32) void {
+                        const network = network_ptr orelse return;
+                        const data = chunk_data[0..chunk_len];
+                        _ = network.handleConfigChunk(tptr, packet_id, Address.init(source_addr), data, chunk_offset);
+                    }
+                }.f,
+                .networkAddCredentialCOM = struct {
+                    fn f(_: ?*anyopaque, _: ?*anyopaque, network: ?*Network, data: [*]const u8, len: u32) bool {
+                        const nw = network orelse return false;
+                        const slice = data[0..@as(usize, @intCast(len))];
+                        if (slice.len > 512) return false;
+                        var tmp = Buffer(512){};
+                        tmp.appendBytes(slice) catch return false;
+                        const parsed = @import("certificate_of_membership.zig").CertificateOfMembership.deserialize(512, &tmp, 0) catch return false;
+                        var com = parsed.com;
+                        const verify = @import("membership.zig").VerifyCallbacks{};
+                        return nw.addCredentialCom(&com, verify) != .rejected;
+                    }
+                }.f,
+                .networkMac = struct {
+                    fn f(_: ?*anyopaque, nw: ?*Network) MAC {
+                        return nw.?._mac;
+                    }
+                }.f,
+                .networkUserPtr = struct {
+                    fn f(_: ?*anyopaque, nw: ?*Network) ?*anyopaque {
+                        return nw.?._u_ptr;
+                    }
+                }.f,
+                .networkFilterIncomingPacket = struct {
+                    fn f(_: ?*anyopaque, tptr: ?*anyopaque, network: ?*Network, peer: ?*Peer, local_addr: u64, source_mac: *const MAC, dest_mac: *const MAC, frame_data: [*]const u8, frame_len: u32, ethertype: u32, vlan_id: u32) i32 {
+                        const nw = network orelse return 0;
+                        const p = peer orelse return 0;
+                        return nw.filterIncomingPacket(
                             tptr,
-                            0, // local_socket (use primary)
-                            remote_addr,
-                            data,
-                            len,
-                            64, // ttl
+                            p.address(),
+                            Address.init(local_addr),
+                            source_mac.*,
+                            dest_mac.*,
+                            frame_data[0..@intCast(frame_len)],
+                            frame_len,
+                            @intCast(ethertype),
+                            @intCast(vlan_id),
                         );
                     }
-                }
-            }.f,
-
-            .pathAddress = struct {
-                var stub_address: InetAddress = InetAddress.initV4([4]u8{ 127, 0, 0, 1 }, 9993);
-
-                fn f(_: ?*anyopaque, path: ?*anyopaque) *const InetAddress {
-                    if (path) |p| {
-                        const Path = @import("path.zig").Path;
-                        const path_obj: *Path = @ptrCast(@alignCast(p));
-                        return path_obj.address();
+                }.f,
+                .networkPushCredentials = struct {
+                    fn f(_: ?*anyopaque, tptr: ?*anyopaque, peer_addr: u64, network: ?*Network, now_val: i64, _: [*]const u8, _: u32) void {
+                        network.?.pushCredentialsIfNeeded(tptr, Address.init(peer_addr), now_val);
                     }
-                    // Return stub address if no path
-                    return &stub_address;
-                }
-            }.f,
+                }.f,
+                .networkControllerHandleConfigRequest = struct {
+                    fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, from_addr: *const InetAddress, requester_identity: *const Identity, request_packet_id: u64, nwid: u64, meta_data: *const Dictionary(network_controller_mod.metadata_dict_capacity)) bool {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        const controller = node.network_controller orelse return false;
 
-            .pathLocalSocket = struct {
-                fn f(_: ?*anyopaque, path: ?*anyopaque) i64 {
-                    if (path) |p| {
-                        const Path = @import("path.zig").Path;
-                        const path_obj: *Path = @ptrCast(@alignCast(p));
-                        return path_obj.localSocket();
+                        _ = tptr;
+                        controller.request(nwid, from_addr, request_packet_id, requester_identity, meta_data);
+                        return true;
                     }
-                    return 0; // Default socket
-                }
-            }.f,
+                }.f,
+                .networkHandleConfig = struct {
+                    fn f(_: ?*anyopaque, tptr: ?*anyopaque, network_ptr: ?*Network, packet_id: u64, from_addr: u64, chunk_data: [*]const u8, chunk_len: u32) void {
+                        const network = network_ptr orelse return;
+                        const data = chunk_data[0..chunk_len];
+                        _ = network.handleConfigChunk(tptr, packet_id, Address.init(from_addr), data, 0);
+                    }
+                }.f,
+            },
 
-            .pathRateGateEchoRequest = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64) bool {
-                    return true; // TODO: Rate gate echo requests
-                }
-            }.f,
+            .multicast = .{
+                .multicasterRemove = struct {
+                    fn f(ctx: ?*anyopaque, nwid: u64, mac_bytes: *const [6]u8, adi: u32, addr: u64) void {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        const mg = MulticastGroup.init(MAC.fromBytes(mac_bytes), adi);
+                        node.multicaster.remove(nwid, mg, Address.init(addr));
+                    }
+                }.f,
+                .multicasterAddMultiple = struct {
+                    fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, now_val: i64, nwid: u64, mac_bytes: *const [6]u8, adi: u32, addresses_data: [*]const u8, address_count: u32, _: u32) void {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        const mg = MulticastGroup.init(MAC.fromBytes(mac_bytes), adi);
+                        const addr_len = @as(usize, @intCast(address_count * constants.address_length));
+                        node.multicaster.addMultiple(
+                            tptr,
+                            now_val,
+                            nwid,
+                            mg,
+                            addresses_data[0..addr_len],
+                            address_count,
+                            multicastSendOutbound,
+                        );
+                    }
+                }.f,
+                .multicasterAdd = struct {
+                    fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, now_val: i64, nwid: u64, mg: *const MulticastGroup, addr: u64) void {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        node.multicaster.add(tptr, now_val, nwid, mg.*, Address.init(addr), multicastSendOutbound);
+                    }
+                }.f,
+                .multicasterGather = struct {
+                    fn f(ctx: ?*anyopaque, peer_addr: u64, nwid: u64, mg: *const MulticastGroup, out_packet: *Packet, limit: u32) u32 {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        return node.multicaster.gather(Address.init(peer_addr), nwid, mg.*, &out_packet.buf, limit);
+                    }
+                }.f,
+                .multicasterReceiveMulticastFrame = struct {
+                    fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, nwid: u64, source_addr: u64, mg: *const MulticastGroup, frame_data: [*]const u8, frame_len: u32, ethertype: u32) void {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        const network = node.getNetwork(nwid) orelse return;
+                        if (!network.subscribedToMulticastGroup(mg, true)) return;
+
+                        const source_peer = Address.init(source_addr);
+                        const source_mac = MAC.fromAddress(source_peer, nwid);
+                        if (network.filterIncomingPacket(
+                            tptr,
+                            source_peer,
+                            node.identity.address(),
+                            source_mac,
+                            mg.mac(),
+                            frame_data[0..@as(usize, @intCast(frame_len))],
+                            frame_len,
+                            @intCast(ethertype),
+                            0,
+                        ) > 0) {
+                            node.putFrame(tptr, nwid, null, &source_mac, &mg.mac(), ethertype, 0, frame_data, frame_len);
+                        }
+                    }
+                }.f,
+                .multicasterReplicateMulticastFrame = struct {
+                    fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, nwid: u64, origin_addr: u64, source_mac: *const MAC, mg: *const MulticastGroup, frame_data: [*]const u8, frame_len: u32, ethertype: u32) void {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        const network = node.getNetwork(nwid) orelse return;
+                        multicastReplicateInbound(
+                            node,
+                            tptr,
+                            network,
+                            Address.init(origin_addr),
+                            source_mac,
+                            mg,
+                            frame_data[0..@as(usize, @intCast(frame_len))],
+                            ethertype,
+                        );
+                    }
+                }.f,
+            },
+
+            // Peer and path operations
+            .peer = .{
+                .peerKey = struct {
+                    fn f(_: ?*anyopaque, peer: ?*Peer) *const [32]u8 {
+                        const p = peer.?;
+                        const key_48 = p.key();
+                        return @ptrCast(key_48);
+                    }
+                }.f,
+                .peerAesKeys = struct {
+                    fn f(_: ?*anyopaque, peer: ?*Peer) ?*const [2]Aes {
+                        const p = peer.?;
+                        return p.aesKeys();
+                    }
+                }.f,
+                .peerAesKeysIfSupported = struct {
+                    fn f(_: ?*anyopaque, peer: ?*Peer) ?*const [2]Aes {
+                        const p = peer.?;
+                        return p.aesKeysIfSupported();
+                    }
+                }.f,
+                .peerPublicKey = struct {
+                    fn f(_: ?*anyopaque, peer: ?*Peer) *const ecc.Public {
+                        const p = peer.?;
+                        return p.identity().publicKey();
+                    }
+                }.f,
+                .peerAddress = struct {
+                    fn f(_: ?*anyopaque, peer: ?*Peer) u64 {
+                        return peer.?.address().toInt();
+                    }
+                }.f,
+                .peerReceived = struct {
+                    fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, peer: ?*Peer, path: ?*Path, hops: u32, packet_id: u64, payload_len: u32, verb_val: u32, in_re_packet_id: u64, in_re_verb: u32, trust_established: bool, network_id: u64, flow_id: i32) void {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        const Verb = @import("packet.zig").Verb;
+
+                        const p = peer.?;
+                        const pth = path.?;
+                        const v: Verb = @enumFromInt(verb_val);
+                        const in_re_v: Verb = std.meta.intToEnum(Verb, in_re_verb) catch blk: {
+                            std.log.warn("ERROR packet references invalid verb {}", .{in_re_verb});
+                            break :blk .nop;
+                        };
+
+                        p.received(tptr, pth, hops, packet_id, payload_len, v, in_re_packet_id, in_re_v, trust_established, network_id, flow_id, node.now);
+                    }
+                }.f,
+                .peerRecordIncomingInvalidPacket = struct {
+                    fn f(_: ?*anyopaque, peer: ?*Peer, path: ?*Path) void {
+                        _ = peer;
+                        _ = path;
+                    }
+                }.f,
+                .peerRecordOutgoingPacket = struct {
+                    fn f(_: ?*anyopaque, peer: ?*Peer, path: ?*Path, packet_id: u64, payload_len: u32, verb: u32, flow_id: i32, now_val: i64) void {
+                        _ = peer;
+                        _ = path;
+                        _ = packet_id;
+                        _ = payload_len;
+                        _ = verb;
+                        _ = flow_id;
+                        _ = now_val;
+                    }
+                }.f,
+                .peerRateGateQoS = struct {
+                    fn f(_: ?*anyopaque, peer: ?*Peer, now_val: i64, path: ?*Path) bool {
+                        const p = peer orelse return false;
+                        const pa = path orelse return false;
+                        return p.rateGatePushDirectPaths(now_val) and pa.rateGateEchoRequest(now_val);
+                    }
+                }.f,
+                .peerReceivedQoS = struct {
+                    fn f(_: ?*anyopaque, peer: ?*Peer, path: ?*Path, now_val: i64, count: u32, delays: [*]const u64, packets: [*]const u16) void {
+                        _ = peer;
+                        _ = path;
+                        _ = now_val;
+                        _ = count;
+                        _ = delays;
+                        _ = packets;
+                    }
+                }.f,
+                .peerRateGatePathNegotiation = struct {
+                    fn f(_: ?*anyopaque, peer: ?*Peer, now_val: i64, path: ?*Path) bool {
+                        const p = peer orelse return false;
+                        const pa = path orelse return false;
+                        return p.rateGateInboundWhoisRequest(now_val) and pa.rateGateEchoRequest(now_val);
+                    }
+                }.f,
+                .peerProcessIncomingPathNegotiationRequest = struct {
+                    fn f(_: ?*anyopaque, peer: ?*Peer, now_val: i64, path: ?*Path, verb: i16) void {
+                        _ = peer;
+                        _ = now_val;
+                        _ = path;
+                        _ = verb;
+                    }
+                }.f,
+                .peerFlowHashingSupported = struct {
+                    fn f(_: ?*anyopaque, peer: ?*Peer) bool {
+                        return peer != null;
+                    }
+                }.f,
+                .peerIdentity = struct {
+                    fn f(_: ?*anyopaque, peer: ?*Peer) *const Identity {
+                        return peer.?.identity();
+                    }
+                }.f,
+                .peerSetRemoteVersion = struct {
+                    fn f(_: ?*anyopaque, peer: ?*Peer, proto: u32, major: u32, minor: u32, rev: u32) void {
+                        peer.?.setRemoteVersion(@intCast(proto), @intCast(major), @intCast(minor), @intCast(rev));
+                    }
+                }.f,
+                .peerRateGateInboundWhoisRequest = struct {
+                    fn f(_: ?*anyopaque, peer: ?*Peer, now_val: i64) bool {
+                        const p = peer orelse return false;
+                        return p.rateGateInboundWhoisRequest(now_val);
+                    }
+                }.f,
+                .peerAttemptToContactAt = struct {
+                    fn f(_: ?*anyopaque, tptr: ?*anyopaque, peer: ?*Peer, now_val: i64, remote_addr: *const InetAddress, timeout: i64, trusted: bool) void {
+                        _ = tptr;
+                        _ = peer;
+                        _ = now_val;
+                        _ = remote_addr;
+                        _ = timeout;
+                        _ = trusted;
+                    }
+                }.f,
+                .peerReceivePushDirectPaths = struct {
+                    fn f(_: ?*anyopaque, tptr: ?*anyopaque, peer: ?*Peer, data: [*]const u8, len: u32, now_val: i64) void {
+                        _ = tptr;
+                        _ = peer;
+                        _ = data;
+                        _ = len;
+                        _ = now_val;
+                    }
+                }.f,
+            },
+
+            .path = .{
+                .pathSend = struct {
+                    fn f(ctx: ?*anyopaque, path: ?*Path, tptr: ?*anyopaque, data: [*]const u8, len: u32, _: i64) void {
+                        const node: *Self = @ptrCast(@alignCast(ctx.?));
+                        if (path) |p| {
+                            const remote_addr = p.address();
+                            node.callbacks.wireSend(
+                                node.callbacks.ctx,
+                                tptr,
+                                0,
+                                remote_addr,
+                                data,
+                                len,
+                                64,
+                            );
+                        }
+                    }
+                }.f,
+                .pathAddress = struct {
+                    var stub_address: InetAddress = InetAddress.initV4([4]u8{ 127, 0, 0, 1 }, 9993);
+
+                    fn f(_: ?*anyopaque, path: ?*Path) *const InetAddress {
+                        if (path) |p| {
+                            return p.address();
+                        }
+                        return &stub_address;
+                    }
+                }.f,
+                .pathLocalSocket = struct {
+                    fn f(_: ?*anyopaque, path: ?*Path) i64 {
+                        if (path) |p| {
+                            return p.localSocket();
+                        }
+                        return 0;
+                    }
+                }.f,
+                .pathRateGateEchoRequest = struct {
+                    fn f(_: ?*anyopaque, path: ?*Path, now: i64) bool {
+                        const p = path orelse return false;
+                        return p.rateGateEchoRequest(now);
+                    }
+                }.f,
+                .pathUpdateLatency = struct {
+                    fn f(_: ?*anyopaque, path: ?*Path, latency: u32, _: i64) void {
+                        path.?.updateLatency(latency);
+                    }
+                }.f,
+            },
 
             // Trace operations (logging/debugging)
             .traceIncomingPacketMacFailure = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u32, _: [*:0]const u8) void {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*Path, _: u64, _: u64, _: u32, _: [*:0]const u8) void {
                     std.debug.print("  ✗ MAC verification failure\n", .{});
                 }
             }.f,
 
             .traceIncomingPacketInvalid = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u32, _: u32, _: [*:0]const u8) void {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*Path, _: u64, _: u64, _: u32, _: u32, _: [*:0]const u8) void {
                     std.debug.print("  ✗ Invalid packet\n", .{});
                 }
             }.f,
 
             .traceIncomingPacketDroppedHELLO = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: [*:0]const u8) void {
+                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*Path, _: u64, _: u64, _: [*:0]const u8) void {
                     std.debug.print("  ✗ Dropped HELLO packet\n", .{});
                 }
             }.f,
 
             // Identity verification
             .nodeRateGateIdentityVerification = struct {
-                fn f(_: ?*anyopaque, _: i64, _: *const InetAddress) bool {
-                    return true; // TODO: Rate gate identity verification
-                }
-            }.f,
-
-            .peerIdentity = struct {
-                fn f(_: ?*anyopaque, peer: ?*anyopaque) *const Identity {
-                    const Peer = @import("peer.zig").Peer;
-                    const p: *Peer = @ptrCast(@alignCast(peer.?));
-                    return p.identity();
-                }
-            }.f,
-
-            .peerSetRemoteVersion = struct {
-                fn f(_: ?*anyopaque, peer: ?*anyopaque, proto: u32, major: u32, minor: u32, rev: u32) void {
-                    const Peer = @import("peer.zig").Peer;
-                    const p: *Peer = @ptrCast(@alignCast(peer.?));
-                    p.setRemoteVersion(@intCast(proto), @intCast(major), @intCast(minor), @intCast(rev));
-                }
-            }.f,
-
-            // Additional Topology callbacks
-            .topologyAddPeer = struct {
-                fn f(ctx: ?*anyopaque, _: ?*anyopaque, new_identity: *const Identity) ?*anyopaque {
+                fn f(ctx: ?*anyopaque, now_val: i64, addr: *const InetAddress) bool {
                     const node: *Self = @ptrCast(@alignCast(ctx.?));
-                    const Peer = @import("peer.zig").Peer;
-                    // Create a new Peer from the identities (ECDH key agreement)
-                    const peer = Peer.create(&node.identity, new_identity) orelse return null;
-                    return @ptrCast(node.topology.addPeer(&peer));
-                }
-            }.f,
-
-            .topologyIsUpstream = struct {
-                fn f(_: ?*anyopaque, _: *const Identity) bool {
-                    return false; // TODO: Check if identity is root server
-                }
-            }.f,
-
-            .topologyPlanetWorldId = struct {
-                fn f(_: ?*anyopaque) u64 {
-                    return 0; // TODO: Return planet world ID
-                }
-            }.f,
-
-            .topologyPlanetWorldTimestamp = struct {
-                fn f(_: ?*anyopaque) u64 {
-                    return 0; // TODO: Return planet timestamp
-                }
-            }.f,
-
-            .topologySerializePlanet = struct {
-                fn f(_: ?*anyopaque, _: [*]u8, _: u32) u32 {
-                    return 0; // TODO: Serialize planet world
-                }
-            }.f,
-
-            .topologySerializeUpdatedMoons = struct {
-                fn f(_: ?*anyopaque, _: [*]const u64, _: [*]const u64, _: u32, _: [*]u8, _: u32) u32 {
-                    return 0; // TODO: Serialize moon updates
-                }
-            }.f,
-
-            .topologyShouldAcceptWorldUpdateFrom = struct {
-                fn f(_: ?*anyopaque, _: u64) bool {
-                    return false; // TODO: Check if world update should be accepted
-                }
-            }.f,
-
-            .topologyAddWorld = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: [*]const u8, _: u32) bool {
-                    return false; // TODO: Add world from serialized data
+                    _ = now_val;
+                    _ = addr;
+                    return node.identity.address().isSet();
                 }
             }.f,
 
             .selfAwarenessIam = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: i64, _: *const InetAddress, _: *const InetAddress, _: bool, _: i64) void {
-                    // TODO: Record externally observed address
-                }
-            }.f,
-
-            .pathUpdateLatency = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: i64) void {
-                    // TODO: Update path latency
-                }
-            }.f,
-
-            // Network operation callbacks
-            .nodeGetNetwork = struct {
-                fn f(ctx: ?*anyopaque, nwid: u64) ?*anyopaque {
+                fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, nwid: u64, now_val: i64, from_addr: *const InetAddress, observed_addr: *const InetAddress, trusted: bool, local_socket: i64) void {
                     const node: *Self = @ptrCast(@alignCast(ctx.?));
-                    return @ptrCast(node.getNetwork(nwid));
+                    _ = tptr;
+                    _ = nwid;
+                    _ = now_val;
+                    _ = from_addr;
+                    _ = observed_addr;
+                    _ = trusted;
+                    _ = local_socket;
+                    _ = node;
                 }
             }.f,
 
-            .nodeExpectingReplyTo = struct {
-                fn f(ctx: ?*anyopaque, packet_id: u64) bool {
-                    const node: *Self = @ptrCast(@alignCast(ctx.?));
-                    return node.isExpectingReplyTo(packet_id);
-                }
-            }.f,
-
-            .networkController = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque) u64 {
-                    return 0; // TODO: Get network controller address
-                }
-            }.f,
-
-            .networkSetNotFound = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) void {
-                    // TODO: Mark network as not found
-                }
-            }.f,
-
-            .networkSetAccessDenied = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) void {
-                    // TODO: Mark network as access denied
-                }
-            }.f,
-
-            .networkGate = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) bool {
-                    return true; // TODO: Check if peer is allowed on network
-                }
-            }.f,
-
-            .networkPeerRequestedCredentials = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: i64) void {
-                    // TODO: Handle credential request
-                }
-            }.f,
-
-            .networkConfigHasCom = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque) bool {
-                    return false; // TODO: Check if network has COM
-                }
-            }.f,
-
-            .networkSetAuthenticationRequired = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: [*:0]const u8) void {
-                    // TODO: Set authentication required
-                }
-            }.f,
-
-            .networkHandleConfigChunk = struct {
-                fn f(_: ?*anyopaque, tptr: ?*anyopaque, network_ptr: ?*anyopaque, packet_id: u64, source_addr: u64, chunk_data: [*]const u8, chunk_offset: u32, chunk_len: u32) void {
-                    const network: *Network = @ptrCast(@alignCast(network_ptr orelse return));
-                    const data = chunk_data[0..chunk_len];
-                    const controller = Address.init(source_addr);
-                    _ = network.handleConfigChunk(tptr, packet_id, controller, data, chunk_offset);
-                }
-            }.f,
-
-            .multicasterRemove = struct {
-                fn f(_: ?*anyopaque, _: u64, _: *const [6]u8, _: u32, _: u64) void {
-                    // TODO: Remove multicast subscription
-                }
-            }.f,
-
-            .multicasterAddMultiple = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: u64, _: *const [6]u8, _: u32, _: [*]const u8, _: u32, _: u32) void {
-                    // TODO: Add multiple multicast members
-                }
-            }.f,
-
-            .switchDoAnythingWaitingForPeer = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) void {
-                    // TODO: Process packets waiting for this peer
-                }
-            }.f,
-
-            .networkAddCredentialCOM = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: [*]const u8, _: u32) bool {
-                    return false; // TODO: Add COM credential to network
-                }
-            }.f,
-
-            // WHOIS / Rendezvous callbacks
-            .topologyAmUpstream = struct {
-                fn f(_: ?*anyopaque) bool {
-                    return false; // TODO: Check if we are an upstream node
-                }
-            }.f,
-
-            .peerRateGateInboundWhoisRequest = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64) bool {
-                    return true; // TODO: Rate gate WHOIS requests
-                }
-            }.f,
-
-            .topologyGetIdentity = struct {
-                fn f(ctx: ?*anyopaque, _: ?*anyopaque, addr: u64) ?*const Identity {
-                    const node: *Self = @ptrCast(@alignCast(ctx.?));
-                    const peer_addr = Address.init(addr);
-                    return node.topology.getIdentity(peer_addr);
-                }
-            }.f,
-
+            // Node / Wire callbacks
             .nodeShouldUsePathForZeroTierTraffic = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: i64, _: *const InetAddress) bool {
-                    return true; // TODO: Check if path should be used
+                fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, nwid: u64, local_socket: i64, remote_addr: *const InetAddress) bool {
+                    const node: *Self = @ptrCast(@alignCast(ctx.?));
+                    return node.shouldUsePathForZeroTierTraffic(tptr, Address.init(nwid), local_socket, remote_addr);
                 }
             }.f,
 
@@ -1596,33 +2385,6 @@ pub const Node = struct {
                 }
             }.f,
 
-            .peerAttemptToContactAt = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: i64, _: bool) void {
-                    // TODO: Attempt to contact peer at address
-                }
-            }.f,
-
-            // Frame / Network callbacks
-            .networkMac = struct {
-                fn f(_: ?*anyopaque, nw: ?*anyopaque) MAC {
-                    const network: *Network = @ptrCast(@alignCast(nw.?));
-                    return network._mac;
-                }
-            }.f,
-
-            .networkUserPtr = struct {
-                fn f(_: ?*anyopaque, nw: ?*anyopaque) ?*anyopaque {
-                    const network: *Network = @ptrCast(@alignCast(nw.?));
-                    return network._u_ptr;
-                }
-            }.f,
-
-            .networkFilterIncomingPacket = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: u64, _: *const MAC, _: *const MAC, _: [*]const u8, _: u32, _: u32, _: u32) i32 {
-                    return 1; // TODO: Filter incoming packet (1 = accept)
-                }
-            }.f,
-
             .pmPutFrame = struct {
                 fn f(ctx: ?*anyopaque, tptr: ?*anyopaque, nwid: u64, user_ptr: ?*anyopaque, source_mac: *const MAC, dest_mac: *const MAC, ethertype: u32, vlan_id: u32, frame_data: *const anyopaque, frame_len: u32, flow_id: i32) void {
                     _ = flow_id;
@@ -1630,67 +2392,23 @@ pub const Node = struct {
                     node.putFrame(tptr, nwid, @ptrCast(@constCast(&user_ptr)), source_mac, dest_mac, ethertype, vlan_id, @ptrCast(frame_data), frame_len);
                 }
             }.f,
-
-            // Multicast callbacks
-            .multicasterAdd = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: u64, _: *const MulticastGroup, _: u64) void {
-                    // TODO: Add multicast group subscription
-                }
-            }.f,
-
-            .networkPushCredentials = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: ?*anyopaque, _: i64, _: [*]const u8, _: u32) void {
-                    // TODO: Process network credentials
-                }
-            }.f,
-
-            .networkControllerHandleConfigRequest = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u64, _: *const anyopaque) void {
-                    // TODO: Handle network config request (controller side)
-                }
-            }.f,
-
-            .networkHandleConfig = struct {
-                fn f(_: ?*anyopaque, tptr: ?*anyopaque, network_ptr: ?*anyopaque, packet_id: u64, from_addr: u64, chunk_data: [*]const u8, chunk_len: u32) void {
-                    const network: *Network = @ptrCast(@alignCast(network_ptr orelse return));
-                    const data = chunk_data[0..chunk_len];
-                    const controller = Address.init(from_addr);
-                    _ = network.handleConfigChunk(tptr, packet_id, controller, data, 0);
-                }
-            }.f,
-
-            .multicasterGather = struct {
-                fn f(_: ?*anyopaque, _: u64, _: u64, _: *const MulticastGroup, _: *Packet, _: u32) u32 {
-                    return 0; // TODO: Gather multicast subscribers
-                }
-            }.f,
-
-            .multicasterReceiveMulticastFrame = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: *const MulticastGroup, _: [*]const u8, _: u32, _: u32) void {
-                    // TODO: Receive multicast frame
-                }
-            }.f,
-
-            .peerReceivePushDirectPaths = struct {
-                fn f(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque, _: [*]const u8, _: u32, _: i64) void {
-                    // TODO: Process direct path hints
-                }
-            }.f,
         };
     }
 
     /// Get planet (root server world).
     pub fn getPlanet(self: *const Self) ?*const anyopaque {
-        _ = self;
-        // TODO: Return topology.planet()
-        return null;
+        return @ptrCast(self.topology.planet());
     }
 
     /// Get moons (user root servers).
     pub fn getMoons(self: *Self, allocator: mem.Allocator) ![]u64 {
-        _ = self;
-        // TODO: Get from topology
-        return try allocator.alloc(u64, 0);
+        var moons: [topology_mod.max_moons]World = undefined;
+        const count = self.topology.moons(&moons);
+        var out = try allocator.alloc(u64, count);
+        for (moons[0..count], 0..) |moon, i| {
+            out[i] = moon.id();
+        }
+        return out;
     }
 
     /// Free a query result.
@@ -1763,18 +2481,20 @@ pub const Node = struct {
         self: *Self,
         t_ptr: ?*anyopaque,
         nwid: u64,
-        user_ptr: ?*?*anyopaque,
+        user_ptr: *?*anyopaque,
         operation: u32,
-        config: ?*const anyopaque,
+        config: ?*const constants.c_api.ZT_VirtualNetworkConfig,
     ) i32 {
-        _ = self;
-        _ = t_ptr;
-        _ = nwid;
-        _ = user_ptr;
-        _ = operation;
-        _ = config;
-        // TODO: Call virtualNetworkConfigFunction callback
-        return 0;
+        const cb = self.callbacks.configure_virtual_network_port orelse return 0;
+        return cb(
+            self.callbacks.ctx,
+            self.user_ptr,
+            t_ptr,
+            nwid,
+            user_ptr,
+            @as(c_uint, @intCast(operation)),
+            config,
+        );
     }
 };
 
@@ -1789,6 +2509,8 @@ pub const Config = struct {
 /// Node status information.
 pub const Status = struct {
     address: u64,
+    public_identity: [identity_mod.string_buffer_length]u8,
+    secret_identity: [identity_mod.string_buffer_length]u8,
     online: bool,
 };
 
@@ -1853,6 +2575,17 @@ pub const Callbacks = struct {
         event_type: u32,
         data: ?*const anyopaque,
     ) void,
+
+    // Virtual network configuration notification
+    configure_virtual_network_port: ?*const fn (
+        ctx: ?*anyopaque,
+        user_ptr: ?*anyopaque,
+        t_ptr: ?*anyopaque,
+        nwid: u64,
+        network_user_ptr: *?*anyopaque,
+        operation: c_uint,
+        config: ?*const constants.c_api.ZT_VirtualNetworkConfig,
+    ) i32 = null,
 };
 
 // ── Tests ─────────────────────────────────────────────────────────
@@ -1884,7 +2617,7 @@ test "Node: init/deinit" {
 
     const config = Config{};
 
-    var node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
+    const node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
     defer node.deinit();
 
     try testing.expectEqual(@as(i64, 1000), node.now);
@@ -1918,14 +2651,14 @@ test "Node: network management" {
 
     const config = Config{};
 
-    var node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
+    const node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
     defer node.deinit();
 
     const nwid: u64 = 0x8056c2e21c000001;
 
     // Join network
     const net = try node.joinNetwork(nwid);
-    try testing.expect(net != null);
+    try testing.expect(node.getNetwork(nwid) == net);
 
     // Get network
     const net2 = node.getNetwork(nwid);
@@ -1933,7 +2666,7 @@ test "Node: network management" {
     try testing.expect(net == net2);
 
     // Leave network
-    node.leaveNetwork(nwid);
+    node.leaveNetwork(null, nwid, null);
 
     // Network should be gone
     const net3 = node.getNetwork(nwid);
@@ -1967,12 +2700,12 @@ test "Node: address and status" {
 
     const config = Config{};
 
-    var node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
+    const node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
     defer node.deinit();
 
-    // Address should be from identity
+    // Address should match the generated identity.
     const addr = node.address();
-    try testing.expect(addr == 0); // Default identity is zero
+    try testing.expect(addr != 0);
 
     // Status
     var st: Status = undefined;
@@ -2008,7 +2741,7 @@ test "Node: prng" {
 
     const config = Config{};
 
-    var node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
+    const node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
     defer node.deinit();
 
     // PRNG should produce different values
@@ -2046,7 +2779,7 @@ test "Node: network list" {
 
     const config = Config{};
 
-    var node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
+    const node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
     defer node.deinit();
 
     // Join two networks
@@ -2087,7 +2820,7 @@ test "Node: belongsToNetwork" {
 
     const config = Config{};
 
-    var node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
+    const node = try Node.init(testing.allocator, null, null, &config, callbacks, 1000);
     defer node.deinit();
 
     const nwid: u64 = 0x8056c2e21c000001;
@@ -2132,7 +2865,7 @@ test "Node: expectReplyTo and isExpectingReplyTo" {
             fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: ?*const anyopaque) void {}
         }.f,
     };
-    var node = try Node.init(testing.allocator, null, null, &Config{}, callbacks, 1000);
+    const node = try Node.init(testing.allocator, null, null, &Config{}, callbacks, 1000);
     defer node.deinit();
 
     const pkt_id: u64 = 0xDEADBEEF_12345678;
@@ -2181,7 +2914,7 @@ test "Node: expectReplyTo wraps ring buffer" {
             fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: ?*const anyopaque) void {}
         }.f,
     };
-    var node = try Node.init(testing.allocator, null, null, &Config{}, callbacks, 1000);
+    const node = try Node.init(testing.allocator, null, null, &Config{}, callbacks, 1000);
     defer node.deinit();
 
     // Fill one bucket with 33 entries (32-slot ring buffer + 1 overflow).
@@ -2200,4 +2933,427 @@ test "Node: expectReplyTo wraps ring buffer" {
     // The 33rd entry is still present
     const last_id = base | (@as(u64, 32) << 40);
     try testing.expect(node.isExpectingReplyTo(last_id));
+}
+
+test "Node: direct path tracking" {
+    const callbacks = Callbacks{
+        .ctx = null,
+        .stateObjectGet = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]u8, _: u32) i32 {
+                return 0;
+            }
+        }.f,
+        .stateObjectPut = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}
+        }.f,
+        .stateObjectDelete = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64) void {}
+        }.f,
+        .wireSend = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: [*]const u8, _: u32, _: i32) void {}
+        }.f,
+        .frameInject = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u64, _: u32, _: u32, _: [*]const u8, _: u32) void {}
+        }.f,
+        .event = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: ?*const anyopaque) void {}
+        }.f,
+    };
+
+    const node = try Node.init(testing.allocator, null, null, &Config{}, callbacks, 1000);
+    defer node.deinit();
+
+    const addr = InetAddress.initV4(.{ 10, 0, 0, 1 }, 9993);
+    try testing.expect(node.addLocalInterfaceAddress(&addr));
+    try testing.expect(!node.addLocalInterfaceAddress(&addr));
+
+    const copied = try node.directPaths(testing.allocator);
+    defer testing.allocator.free(copied);
+    try testing.expectEqual(@as(usize, 1), copied.len);
+    try testing.expect(copied[0].eql(&addr));
+
+    node.clearLocalInterfaceAddresses();
+    const cleared = try node.directPaths(testing.allocator);
+    defer testing.allocator.free(cleared);
+    try testing.expectEqual(@as(usize, 0), cleared.len);
+}
+
+test "Node: multicast receive injects subscribed frame" {
+    const TestCtx = struct {
+        var injected: bool = false;
+        var injected_nwid: u64 = 0;
+        var injected_source: u64 = 0;
+        var injected_dest: u64 = 0;
+        var injected_ethertype: u32 = 0;
+        var injected_len: u32 = 0;
+    };
+
+    TestCtx.injected = false;
+    TestCtx.injected_nwid = 0;
+    TestCtx.injected_source = 0;
+    TestCtx.injected_dest = 0;
+    TestCtx.injected_ethertype = 0;
+    TestCtx.injected_len = 0;
+
+    const callbacks = Callbacks{
+        .ctx = null,
+        .stateObjectGet = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]u8, _: u32) i32 {
+                return 0;
+            }
+        }.f,
+        .stateObjectPut = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}
+        }.f,
+        .stateObjectDelete = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64) void {}
+        }.f,
+        .wireSend = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: [*]const u8, _: u32, _: i32) void {}
+        }.f,
+        .frameInject = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, nwid: u64, source_mac: u64, dest_mac: u64, ether_type: u32, _: u32, _: [*]const u8, len: u32) void {
+                TestCtx.injected = true;
+                TestCtx.injected_nwid = nwid;
+                TestCtx.injected_source = source_mac;
+                TestCtx.injected_dest = dest_mac;
+                TestCtx.injected_ethertype = ether_type;
+                TestCtx.injected_len = len;
+            }
+        }.f,
+        .event = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: ?*const anyopaque) void {}
+        }.f,
+    };
+
+    const node = try Node.init(testing.allocator, null, null, &Config{}, callbacks, 1000);
+    defer node.deinit();
+
+    const nwid: u64 = 0x8056c2e21c000001;
+    const net = try node.joinNetwork(nwid);
+
+    var nc = NetworkConfig.init();
+    nc.network_id = nwid;
+    nc.issued_to = node.identity.address();
+    nc.flags = network_config_mod.flag_enable_broadcast;
+    nc.multicast_limit = 16;
+    nc.net_type = @intCast(constants.c_api.ZT_NETWORK_TYPE_PUBLIC);
+    nc.rule_count = 1;
+    nc.rules_arr[0].t = @as(u8, constants.c_api.ZT_NETWORK_RULE_ACTION_ACCEPT);
+    try testing.expectEqual(@as(i32, 2), net.setConfiguration(null, &nc, false));
+
+    const mg = MulticastGroup.init(MAC.init(0x01005E000001), 0);
+    net.multicastSubscribe(null, mg);
+
+    const frame = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    const source_addr = Address.init(0x1234567890);
+    node.multicaster.add(null, 1000, nwid, mg, source_addr, null);
+
+    const incoming = node.createIncomingPacketCallbacks(null);
+    incoming.multicast.multicasterReceiveMulticastFrame(
+        @ptrCast(node),
+        null,
+        nwid,
+        source_addr.toInt(),
+        &mg,
+        &frame,
+        frame.len,
+        0x0800,
+    );
+
+    try testing.expect(TestCtx.injected);
+    try testing.expectEqual(nwid, TestCtx.injected_nwid);
+    try testing.expectEqual(MAC.fromAddress(source_addr, nwid).toInt(), TestCtx.injected_source);
+    try testing.expectEqual(mg.mac().toInt(), TestCtx.injected_dest);
+    try testing.expectEqual(@as(u32, 0x0800), TestCtx.injected_ethertype);
+    try testing.expectEqual(@as(u32, frame.len), TestCtx.injected_len);
+}
+
+test "Node: multicast send emulates ipv6 ndp neighbor advertisement" {
+    const TestCtx = struct {
+        var injected: bool = false;
+        var injected_nwid: u64 = 0;
+        var injected_source: u64 = 0;
+        var injected_dest: u64 = 0;
+        var injected_ethertype: u32 = 0;
+        var injected_len: u32 = 0;
+        var injected_payload: [72]u8 = [_]u8{0} ** 72;
+        var wire_send_count: usize = 0;
+    };
+
+    TestCtx.injected = false;
+    TestCtx.injected_nwid = 0;
+    TestCtx.injected_source = 0;
+    TestCtx.injected_dest = 0;
+    TestCtx.injected_ethertype = 0;
+    TestCtx.injected_len = 0;
+    TestCtx.injected_payload = [_]u8{0} ** 72;
+    TestCtx.wire_send_count = 0;
+
+    const callbacks = Callbacks{
+        .ctx = null,
+        .stateObjectGet = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]u8, _: u32) i32 {
+                return 0;
+            }
+        }.f,
+        .stateObjectPut = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}
+        }.f,
+        .stateObjectDelete = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64) void {}
+        }.f,
+        .wireSend = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: [*]const u8, _: u32, _: i32) void {
+                TestCtx.wire_send_count += 1;
+            }
+        }.f,
+        .frameInject = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, nwid: u64, source_mac: u64, dest_mac: u64, ether_type: u32, _: u32, data: [*]const u8, len: u32) void {
+                TestCtx.injected = true;
+                TestCtx.injected_nwid = nwid;
+                TestCtx.injected_source = source_mac;
+                TestCtx.injected_dest = dest_mac;
+                TestCtx.injected_ethertype = ether_type;
+                TestCtx.injected_len = len;
+                @memcpy(TestCtx.injected_payload[0..len], data[0..len]);
+            }
+        }.f,
+        .event = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: ?*const anyopaque) void {}
+        }.f,
+    };
+
+    const node = try Node.init(testing.allocator, null, null, &Config{}, callbacks, 1000);
+    defer node.deinit();
+
+    const nwid: u64 = 0x8056c2e21c000001;
+    const net = try node.joinNetwork(nwid);
+
+    var nc = NetworkConfig.init();
+    nc.network_id = nwid;
+    nc.issued_to = node.identity.address();
+    nc.flags = network_config_mod.flag_enable_broadcast | network_config_mod.flag_enable_ipv6_ndp_emulation;
+    nc.multicast_limit = 16;
+    nc.net_type = @intCast(constants.c_api.ZT_NETWORK_TYPE_PUBLIC);
+    nc.rule_count = 1;
+    nc.rules_arr[0].t = @as(u8, constants.c_api.ZT_NETWORK_RULE_ACTION_ACCEPT);
+    nc.static_ips[0] = InetAddress.makeIpv6rfc4193(nwid, node.identity.address().toInt());
+    nc.static_ip_count = 1;
+    try testing.expectEqual(@as(i32, 2), net.setConfiguration(null, &nc, false));
+
+    const from = MAC.init(0x021122334455);
+    const target = Address.init(0x1234567890);
+    const target_mac = MAC.fromAddress(target, nwid);
+    const target_ip = InetAddress.makeIpv6rfc4193(nwid, target.toInt()).rawIpData().?;
+    const local_ip = nc.static_ips[0].rawIpData().?;
+
+    var ns: [72]u8 = [_]u8{0} ** 72;
+    ns[0] = 0x60;
+    ns[4] = 0x00;
+    ns[5] = 0x20;
+    ns[6] = icmpv6_next_header;
+    ns[7] = 0xff;
+    @memcpy(ns[8..24], local_ip[0..16]);
+    ns[24] = 0xff;
+    ns[25] = 0x02;
+    ns[38] = 0x00;
+    ns[39] = 0x01;
+    ns[40] = icmpv6_neighbor_solicitation;
+    ns[44] = 0x00;
+    ns[45] = 0x00;
+    ns[46] = 0x00;
+    ns[47] = 0x00;
+    @memcpy(ns[48..64], target_ip[0..16]);
+    ns[64] = 0x01;
+    ns[65] = 0x01;
+    var from_bytes: [MAC_LENGTH]u8 = undefined;
+    from.copyTo(&from_bytes);
+    @memcpy(ns[66..72], &from_bytes);
+
+    const dest = MAC.init(0x3333ff345678);
+    node.multicastSend(null, net, &from, &dest, ethertype_ipv6, 0, &ns, ns.len, false);
+
+    try testing.expect(TestCtx.injected);
+    try testing.expectEqual(@as(usize, 0), TestCtx.wire_send_count);
+    try testing.expectEqual(nwid, TestCtx.injected_nwid);
+    try testing.expectEqual(target_mac.toInt(), TestCtx.injected_source);
+    try testing.expectEqual(from.toInt(), TestCtx.injected_dest);
+    try testing.expectEqual(ethertype_ipv6, TestCtx.injected_ethertype);
+    try testing.expectEqual(@as(u32, 72), TestCtx.injected_len);
+    try testing.expectEqual(@as(u8, icmpv6_neighbor_advertisement), TestCtx.injected_payload[40]);
+    try testing.expectEqualSlices(u8, target_ip[0..16], TestCtx.injected_payload[48..64]);
+}
+
+test "Node: inbound multicast replication fans out to other members" {
+    const TestCtx = struct {
+        var wire_send_count: usize = 0;
+        var last_len: u32 = 0;
+    };
+
+    TestCtx.wire_send_count = 0;
+    TestCtx.last_len = 0;
+
+    const callbacks = Callbacks{
+        .ctx = null,
+        .stateObjectGet = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]u8, _: u32) i32 {
+                return 0;
+            }
+        }.f,
+        .stateObjectPut = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}
+        }.f,
+        .stateObjectDelete = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64) void {}
+        }.f,
+        .wireSend = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, _: *const InetAddress, _: [*]const u8, len: u32, _: i32) void {
+                TestCtx.wire_send_count += 1;
+                TestCtx.last_len = len;
+            }
+        }.f,
+        .frameInject = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u64, _: u32, _: u32, _: [*]const u8, _: u32) void {}
+        }.f,
+        .event = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: ?*const anyopaque) void {}
+        }.f,
+    };
+
+    const node = try Node.init(testing.allocator, null, null, &Config{}, callbacks, 1000);
+    defer node.deinit();
+
+    const nwid: u64 = 0x8056c2e21c000001;
+    const net = try node.joinNetwork(nwid);
+
+    var nc = NetworkConfig.init();
+    nc.network_id = nwid;
+    nc.issued_to = node.identity.address();
+    nc.multicast_limit = 16;
+    nc.net_type = @intCast(constants.c_api.ZT_NETWORK_TYPE_PUBLIC);
+    nc.rule_count = 1;
+    nc.rules_arr[0].t = @as(u8, constants.c_api.ZT_NETWORK_RULE_ACTION_ACCEPT);
+    try testing.expectEqual(@as(i32, 2), net.setConfiguration(null, &nc, false));
+
+    var peer_id = try Identity.generate(testing.allocator);
+    var peer = Peer.create(&node.identity, &peer_id) orelse return error.SkipZigTest;
+    defer peer.deinit();
+
+    const remote = InetAddress.initV4(.{ 10, 0, 0, 2 }, 9993);
+    const path = node.topology.getPath(1, &remote) orelse return error.SkipZigTest;
+    path.received(node.now);
+    path.updateLatency(10);
+    try testing.expect(peer.addPath(path, node.now));
+    const stored_peer = node.topology.addPeer(&peer) orelse return error.SkipZigTest;
+    _ = stored_peer;
+
+    const mg = MulticastGroup.init(MAC.init(0x01005E000001), 0x12345678);
+    const origin = Address.init(0x2233445566);
+    node.multicaster.add(null, node.now, nwid, mg, peer_id.address(), null);
+    node.multicaster.add(null, node.now, nwid, mg, origin, null);
+
+    const incoming = node.createIncomingPacketCallbacks(null);
+    const payload = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    incoming.multicast.multicasterReplicateMulticastFrame(
+        @ptrCast(node),
+        null,
+        nwid,
+        origin.toInt(),
+        &MAC.init(0x001122334455),
+        &mg,
+        &payload,
+        payload.len,
+        0x0800,
+    );
+
+    try testing.expectEqual(@as(usize, 1), TestCtx.wire_send_count);
+    try testing.expect(TestCtx.last_len > 0);
+}
+
+test "Node: multicast send prefers best live replicator" {
+    const TestCtx = struct {
+        var wire_send_count: usize = 0;
+        var last_remote_port: u16 = 0;
+        var last_len: u32 = 0;
+    };
+
+    TestCtx.wire_send_count = 0;
+    TestCtx.last_remote_port = 0;
+    TestCtx.last_len = 0;
+
+    const callbacks = Callbacks{
+        .ctx = null,
+        .stateObjectGet = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]u8, _: u32) i32 {
+                return 0;
+            }
+        }.f,
+        .stateObjectPut = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64, _: [*]const u8, _: u32) void {}
+        }.f,
+        .stateObjectDelete = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: [*]const u64) void {}
+        }.f,
+        .wireSend = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: i64, remote_addr: *const InetAddress, _: [*]const u8, len: u32, _: i32) void {
+                TestCtx.wire_send_count += 1;
+                TestCtx.last_remote_port = remote_addr.port();
+                TestCtx.last_len = len;
+            }
+        }.f,
+        .frameInject = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u64, _: u64, _: u64, _: u32, _: u32, _: [*]const u8, _: u32) void {}
+        }.f,
+        .event = struct {
+            fn f(_: ?*anyopaque, _: ?*anyopaque, _: u32, _: ?*const anyopaque) void {}
+        }.f,
+    };
+
+    const node = try Node.init(testing.allocator, null, null, &Config{}, callbacks, 1000);
+    defer node.deinit();
+
+    const nwid: u64 = 0x8056c2e21c000001;
+    const net = try node.joinNetwork(nwid);
+
+    var nc = NetworkConfig.init();
+    nc.network_id = nwid;
+    nc.issued_to = node.identity.address();
+    nc.multicast_limit = 16;
+    nc.net_type = @intCast(constants.c_api.ZT_NETWORK_TYPE_PUBLIC);
+    nc.rule_count = 1;
+    nc.rules_arr[0].t = @as(u8, constants.c_api.ZT_NETWORK_RULE_ACTION_ACCEPT);
+
+    var id_fast = try Identity.generate(testing.allocator);
+    var id_slow = try Identity.generate(testing.allocator);
+    try testing.expect(nc.addSpecialist(id_fast.address(), network_config_mod.specialist_type_multicast_replicator));
+    try testing.expect(nc.addSpecialist(id_slow.address(), network_config_mod.specialist_type_multicast_replicator));
+    try testing.expectEqual(@as(i32, 2), net.setConfiguration(null, &nc, false));
+
+    var peer_fast = Peer.create(&node.identity, &id_fast) orelse return error.SkipZigTest;
+    defer peer_fast.deinit();
+    const addr_fast = InetAddress.initV4(.{ 10, 0, 0, 2 }, 9992);
+    const path_fast = node.topology.getPath(1, &addr_fast) orelse return error.SkipZigTest;
+    path_fast.received(node.now);
+    path_fast.updateLatency(10);
+    try testing.expect(peer_fast.addPath(path_fast, node.now));
+    _ = node.topology.addPeer(&peer_fast) orelse return error.SkipZigTest;
+
+    var peer_slow = Peer.create(&node.identity, &id_slow) orelse return error.SkipZigTest;
+    defer peer_slow.deinit();
+    const addr_slow = InetAddress.initV4(.{ 10, 0, 0, 3 }, 9993);
+    const path_slow = node.topology.getPath(1, &addr_slow) orelse return error.SkipZigTest;
+    path_slow.received(node.now);
+    path_slow.updateLatency(50);
+    try testing.expect(peer_slow.addPath(path_slow, node.now));
+    _ = node.topology.addPeer(&peer_slow) orelse return error.SkipZigTest;
+
+    const from = net.mac();
+    const to = MAC.init(0x01005E000001);
+    const payload = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    node.multicastSend(null, net, &from, &to, 0x0800, 0, &payload, payload.len, false);
+
+    try testing.expectEqual(@as(usize, 1), TestCtx.wire_send_count);
+    try testing.expectEqual(@as(u16, 9992), TestCtx.last_remote_port);
+    try testing.expect(TestCtx.last_len > 0);
 }

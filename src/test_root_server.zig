@@ -12,7 +12,6 @@
 ///
 /// This allows testing the full handshake protocol locally without
 /// needing to connect to real ZeroTier infrastructure.
-
 const std = @import("std");
 const net = std.net;
 
@@ -24,7 +23,7 @@ const pkt = @import("node/packet.zig");
 const buffer_mod = @import("node/buffer.zig");
 const PacketBuffer = buffer_mod.Buffer(pkt.max_packet_length);
 
-// Fixed: STYLE.md 5.7 - Named constants instead of magic numbers
+// Fixed: STYLE.md 5.3 - avoid magic numbers
 const default_zerotier_port: u16 = 9993;
 const peer_cleanup_interval_ms: i64 = 300_000; // 5 minutes
 const packet_dedup_ring_size: usize = 1000;
@@ -169,8 +168,8 @@ const RootServer = struct {
     /// Fixed BUG #33: Clean up peers that haven't been seen in peer_cleanup_interval_ms
     fn cleanupStalePeers(self: *RootServer, now: i64) void {
         const timeout_ms = peer_cleanup_interval_ms;
-        var to_remove = std.ArrayList(u64).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove = std.ArrayList(u64){ .items = &.{}, .capacity = 0 };
+        defer to_remove.deinit(self.allocator);
 
         var it = self.peers.iterator();
         while (it.next()) |entry| {
@@ -178,7 +177,7 @@ const RootServer = struct {
                 // Fixed: STYLE.md 2.2 - OutOfMemory must propagate
                 // If we can't track stale peers due to OOM, skip cleanup entirely
                 // rather than silently doing partial cleanup
-                to_remove.append(entry.key_ptr.*) catch |err| switch (err) {
+                to_remove.append(self.allocator, entry.key_ptr.*) catch |err| switch (err) {
                     error.OutOfMemory => return, // Abort cleanup, retry next time
                 };
             }
@@ -280,7 +279,7 @@ const RootServer = struct {
         // Parse HELLO payload to extract client identity
         var ptr: u32 = pkt.idx_payload;
 
-        // Fixed: STYLE.md 4.5 - validate pointer arithmetic stays within bounds
+        // Fixed: STYLE.md 4.3 - validate pointer arithmetic stays within bounds
         // Skip protocol version (1), major (1), minor (1), revision (2), timestamp (8) = 13 bytes
         const header_size: u32 = 13;
         if (ptr + header_size > pkt.max_packet_length) {

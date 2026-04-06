@@ -506,10 +506,7 @@ pub const Network = struct {
 
     /// Check if bridging is permitted for the given address
     pub fn permitsBridging(self: *const Network, addr: Address) bool {
-        _ = self;
-        _ = addr;
-        // TODO: Implement bridging permission check
-        return false;
+        return self._config.permitsBridging(addr);
     }
 
     /// Static: derive the controller address from a network ID.

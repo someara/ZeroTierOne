@@ -502,7 +502,7 @@ pub const Packet = struct {
         const b = self.buf.getByte(idx_flags) catch return .c25519_poly1305_none;
         const raw: u3 = @intCast((b >> 3) & 0x07);
         // Validate cipher suite is in defined range (0-3).
-        // Values 4-7 are reserved/undefined and must be rejected per STYLE.md §4.5.
+        // Values 4-7 are reserved/undefined and must be rejected per STYLE.md 4.3.
         return switch (raw) {
             0...3 => @enumFromInt(raw),
             else => .c25519_poly1305_none, // Treat unknown as none (will fail auth later)

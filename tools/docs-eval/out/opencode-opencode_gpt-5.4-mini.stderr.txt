@@ -1,0 +1,4 @@
+[0m
+> build · gpt-5.4-mini
+[0m
+[91m[1mError: [0mNo payment method. Add a payment method here: https://opencode.ai/workspace/wrk_01KFJKEV5PN8PTFSJE9X2JH7BM/billing

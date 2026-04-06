@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Test script for Docker-based ZeroTier network
+# Test script for Docker-based ZeroTea network
 #
 # Usage: ./test-network.sh
 
@@ -8,7 +8,7 @@
 # set -e removed - we want to continue even if some checks fail
 
 echo "═══════════════════════════════════════════════════════════"
-echo " ZeroTier Docker Network Test"
+echo " ZeroTea Docker Network Test"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
 

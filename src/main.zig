@@ -1,4 +1,4 @@
-/// ZeroTier Zig Demo — Cross-Platform Demonstration
+/// ZeroTea Demo — Cross-Platform Demonstration
 ///
 /// This demonstrates the converted Zig modules (Node, Switch, Identity, etc.)
 /// working together on both Mac and Linux. It showcases:
@@ -8,8 +8,7 @@
 /// - Memory-safe operations with proper cleanup
 ///
 /// Build: zig build zig-demo
-/// Run:   ./zig-out/bin/zerotier-zig-demo
-
+/// Run:   ./zig-out/bin/zerotea-demo
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -97,8 +96,7 @@ fn mockWireSend(
     _ = data;
     var addr_buf: [64]u8 = undefined;
     const addr_str = remote_addr.toString(&addr_buf);
-    std.debug.print("  → Wire send: socket={d}, addr={s}, len={d}, ttl={d}\n",
-        .{local_socket, addr_str, len, ttl});
+    std.debug.print("  → Wire send: socket={d}, addr={s}, len={d}, ttl={d}\n", .{ local_socket, addr_str, len, ttl });
 }
 
 /// Mock callback: Inject frame into virtual network interface
@@ -117,8 +115,7 @@ fn mockFrameInject(
     demo_ctx.frames_injected += 1;
 
     _ = data;
-    std.debug.print("  → Frame inject: nwid={x:0>16}, src={x:0>12}, dst={x:0>12}, type={x:0>4}, vlan={}, len={}\n",
-        .{nwid, source_mac, dest_mac, ether_type, vlan_id, len});
+    std.debug.print("  → Frame inject: nwid={x:0>16}, src={x:0>12}, dst={x:0>12}, type={x:0>4}, vlan={}, len={}\n", .{ nwid, source_mac, dest_mac, ether_type, vlan_id, len });
 }
 
 /// Mock callback: Handle events (UP, ONLINE, OFFLINE, etc.)
@@ -138,7 +135,7 @@ fn mockEvent(
         else => "UNKNOWN",
     };
 
-    std.debug.print("  → Event: {s} ({d})\n", .{event_name, event_type});
+    std.debug.print("  → Event: {s} ({d})\n", .{ event_name, event_type });
 }
 
 /// Detect and print platform information
@@ -160,22 +157,20 @@ fn printPlatformInfo() void {
     };
 
     std.debug.print("═══════════════════════════════════════════════════════\n", .{});
-    std.debug.print("  ZeroTier Zig Conversion — Cross-Platform Demo\n", .{});
+    std.debug.print("  ZeroTea — Cross-Platform Demo\n", .{});
     std.debug.print("═══════════════════════════════════════════════════════\n", .{});
-    std.debug.print("Platform: {s} {s}\n", .{os_name, arch_name});
+    std.debug.print("Platform: {s} {s}\n", .{ os_name, arch_name });
     std.debug.print("Zig Version: {any}\n", .{builtin.zig_version});
     std.debug.print("\n", .{});
 }
 
-/// Print module conversion statistics
-fn printConversionStats() void {
+/// Print a short demo note
+fn printDemoNotes() void {
     std.debug.print("═══════════════════════════════════════════════════════\n", .{});
-    std.debug.print("  Conversion Statistics\n", .{});
+    std.debug.print("  Demo Notes\n", .{});
     std.debug.print("═══════════════════════════════════════════════════════\n", .{});
-    std.debug.print("Total Modules: 47 (100% complete)\n", .{});
-    std.debug.print("Total Lines:   35,462 lines of Zig\n", .{});
-    std.debug.print("Total Tests:   673 passing tests\n", .{});
-    std.debug.print("Bug Fixes:     7 critical/medium bugs fixed\n", .{});
+    std.debug.print("This demo exercises the ZeroTea core directly.\n", .{});
+    std.debug.print("Use TESTING.md and build.zig for current validation.\n", .{});
     std.debug.print("\n", .{});
 }
 
@@ -185,7 +180,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     printPlatformInfo();
-    printConversionStats();
+    printDemoNotes();
 
     // ── Phase 1: Identity Generation ──────────────────────────────────
     std.debug.print("Phase 1: Identity Generation\n", .{});
@@ -207,7 +202,7 @@ pub fn main() !void {
     const now: i64 = std.time.milliTimestamp();
 
     std.debug.print("Initializing Node (timestamp: {d})...\n", .{now});
-    var node = try Node.init(allocator, null, null, &config, callbacks, now);
+    const node = try Node.init(allocator, null, null, &config, callbacks, now);
     defer node.deinit();
 
     if (demo_ctx.identity_generated) {
@@ -264,7 +259,7 @@ pub fn main() !void {
     std.debug.print("Phase 5: InetAddress Operations\n", .{});
     std.debug.print("───────────────────────────────────────────────────────\n", .{});
 
-    const ipv4_addr = InetAddress.initV4([4]u8{127, 0, 0, 1}, 9993);
+    const ipv4_addr = InetAddress.initV4([4]u8{ 127, 0, 0, 1 }, 9993);
     var ipv4_buf: [64]u8 = undefined;
     const ipv4_str = ipv4_addr.toString(&ipv4_buf);
     std.debug.print("IPv4 localhost: {s}\n", .{ipv4_str});
@@ -304,7 +299,7 @@ pub fn main() !void {
     std.debug.print("  - Frames injected:    {d}\n", .{demo_ctx.frames_injected});
     std.debug.print("\n", .{});
     std.debug.print("═══════════════════════════════════════════════════════\n", .{});
-    std.debug.print("  All 47 Zig modules working correctly!\n", .{});
-    std.debug.print("  Cross-platform build successful on {s}.\n", .{@tagName(builtin.os.tag)});
+    std.debug.print("  ZeroTea demo completed successfully.\n", .{});
+    std.debug.print("  Cross-platform build succeeded on {s}.\n", .{@tagName(builtin.os.tag)});
     std.debug.print("═══════════════════════════════════════════════════════\n", .{});
 }

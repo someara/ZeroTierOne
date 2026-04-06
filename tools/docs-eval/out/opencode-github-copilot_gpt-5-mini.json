@@ -1,0 +1,60 @@
+{
+  "goals": [
+    "Reach broad upstream ZeroTier feature parity in Zig",
+    "Make ZeroTea operationally comparable to upstream zerotier-one",
+    "Improve maintainability with idiomatic Zig design",
+    "Preserve or improve performance where measured"
+  ],
+  "verified": [],
+  "untested": [
+    "zig build",
+    "zig build zig-demo",
+    "zig build selftest",
+    "zig build test-fast --summary all",
+    "zig build test-peer",
+    "zig build test-topology",
+    "zig build test-core",
+    "zig build test --summary all (long integration and fuzz targets)",
+    "zig build service -- --help (build and run the executable)",
+    "zig build bench-info",
+    "zig build bench-packets",
+    "zig build controller",
+    "zig build root-server",
+    "zig build tray",
+    "zig build test-tray",
+    "Direct filtered zig test commands listed in TESTING.md (e.g. zig test src/test_core.zig -I . --test-filter \"node.node.test.Node:\")",
+    "Opt-in test steps listed in TESTING.md (test-tray, test-timeout-retry, test-error-recovery, test-stress, test-real-handshake, test-earth, test-earth-debug, test-http-client)"
+  ],
+  "blocked": [],
+  "broken": [],
+  "next": [
+    "Ownership and lifetime cleanup",
+    "Remove internal C++-shaped APIs where practical",
+    "Keep test-fast, test-peer, test-topology, and test-core useful",
+    "Close verified feature gaps against upstream",
+    "Expand the set of workflows where ZeroTea can replace upstream zerotier-one",
+    "Keep Zig service scope honest and documented while parity is incomplete",
+    "Keep docs aligned with build.zig"
+  ],
+  "unknowns": [
+    "Which of the listed build and test commands have actually been run and their results",
+    "Current, per-subsystem verified parity status against upstream (feature-by-feature)",
+    "Whether ZeroTea can currently replace any upstream workflows in production",
+    "Which support-level items (stable/active/experimental/deferred) are implemented vs only claimed",
+    "CI/build status and any failing tests",
+    "Runtime behaviour and stability of the service binary on target platforms",
+    "Exact mapping from service/README.md to Zig parity (docs explicitly say not to infer)"
+  ],
+  "roadmap_file": "ZIG.md",
+  "command_truth_file": "build.zig",
+  "service_binary": "src/zerotea.zig",
+  "service_readme_parity": "Do not infer Zig support from service/README.md",
+  "support_levels_completion": "Support level is not a completion percentage. It shows priority and confidence, not proof of end-to-end parity.",
+  "docs_used": [
+    "CLAUDE.md",
+    "ZIG.md",
+    "DEVELOPMENT.md",
+    "TESTING.md",
+    "README.md"
+  ]
+}
