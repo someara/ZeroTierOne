@@ -18,10 +18,13 @@ const Callbacks = @import("node/node.zig").Callbacks;
 const Address = @import("node/address.zig").Address;
 const Identity = @import("node/identity.zig").Identity;
 const InetAddress = @import("node/inet_address.zig").InetAddress;
+const Peer = @import("node/peer.zig").Peer;
+const Path = @import("node/path.zig").Path;
 
 const TestContext = struct {
     allocator: std.mem.Allocator,
     controller_addr: net.Address,
+    controller_socket: std.posix.socket_t,
     packets_sent: usize = 0,
     packets_received: usize = 0,
 };
@@ -58,19 +61,36 @@ fn testWireSend(
     ctx: ?*anyopaque,
     _: ?*anyopaque,
     _: i64,
-    _: *const InetAddress,
+    remote_addr: *const InetAddress,
     data: [*]const u8,
     len: u32,
     _: i32,
 ) void {
     const test_ctx: *TestContext = @ptrCast(@alignCast(ctx.?));
 
-    // For now, just track that we tried to send
-    _ = data;
-    _ = len;
-
     test_ctx.packets_sent += 1;
-    std.debug.print("  → testWireSend called (packet #{})\n", .{test_ctx.packets_sent});
+    std.debug.print("  → testWireSend called (packet #{}, {} bytes)\n", .{ test_ctx.packets_sent, len });
+
+    // Actually send the packet via UDP to the controller
+    // Convert InetAddress to sockaddr pointer
+    const sockaddr_ptr: *const std.posix.sockaddr = @ptrCast(&remote_addr.storage);
+    const socklen = if (remote_addr.isV4())
+        @as(std.posix.socklen_t, @sizeOf(std.c.sockaddr.in))
+    else
+        @as(std.posix.socklen_t, @sizeOf(std.c.sockaddr.in6));
+
+    const sent_bytes = std.posix.sendto(
+        test_ctx.controller_socket,
+        data[0..len],
+        0,
+        sockaddr_ptr,
+        socklen,
+    ) catch |err| {
+        std.debug.print("    ❌ Failed to send: {}\n", .{err});
+        return;
+    };
+
+    std.debug.print("    ✓ Sent {} bytes via UDP\n", .{sent_bytes});
 }
 
 fn testFrameInject(
@@ -142,9 +162,14 @@ test "node receives network config from controller" {
     // Step 2: Create test context and callbacks
     std.debug.print("Step 2: Creating test node with callbacks...\n", .{});
 
+    // Create a UDP socket for sending packets
+    const send_socket = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer std.posix.close(send_socket);
+
     var test_ctx = TestContext{
         .allocator = allocator,
         .controller_addr = net.Address.initIp4(.{ 127, 0, 0, 1 }, 19990),
+        .controller_socket = send_socket,
     };
 
     const node_callbacks = Callbacks{
@@ -165,24 +190,116 @@ test "node receives network config from controller" {
 
     std.debug.print("  ✓ Node created with address: {x:0>10}\n\n", .{node.identity.address().toInt()});
 
-    // Step 3: Join network
-    std.debug.print("Step 3: Joining network 0x8056c2e21c000001...\n", .{});
+    // Step 2.5: Add node to controller's peer database for shared key
+    std.debug.print("Step 2.5: Registering node with controller...\n", .{});
 
-    const test_network_id: u64 = 0x8056c2e21c000001;
+    // Compute shared key using controller's identity and node's identity
+    var node_controller_key: [32]u8 = undefined;
+    if (!controller.identity.agree(&node.identity, &node_controller_key)) {
+        std.debug.print("  ❌ ECDH agreement failed\n", .{});
+        return error.ECDHFailed;
+    }
+
+    // Add node to controller's peers
+    try controller.peers.put(node.identity.address().toInt(), .{
+        .address = node.identity.address(),
+        .identity = node.identity,
+        .shared_key = node_controller_key,
+    });
+
+    std.debug.print("  ✓ Node registered with controller\n\n", .{});
+
+    // Step 3: Add controller as a known peer with path
+    std.debug.print("Step 3: Adding controller as known peer...\n", .{});
+
+    // Create a peer for the controller
+    const controller_peer_maybe = Peer.create(&node.identity, &controller.identity);
+    if (controller_peer_maybe == null) {
+        std.debug.print("  ❌ Failed to create peer (ECDH agreement failed)\n", .{});
+        return error.PeerCreationFailed;
+    }
+    const controller_peer = controller_peer_maybe.?;
+
+    // Add peer to topology (topology copies the peer)
+    const added_peer = node.topology.addPeer(&controller_peer);
+    if (added_peer == null) {
+        std.debug.print("  ❌ Failed to add peer to topology\n", .{});
+        return error.TopologyAddFailed;
+    }
+
+    std.debug.print("  ✓ Controller peer created (address: {x:0>10})\n", .{controller.address.toInt()});
+
+    // Create a path for the controller (127.0.0.1:19990)
+    const controller_inet_addr = InetAddress.initV4(.{ 127, 0, 0, 1 }, 19990);
+    var controller_path = Path.initWithAddress(-1, controller_inet_addr);
+
+    // Add path to peer
+    const path_added = added_peer.?.addPath(&controller_path, now);
+    if (!path_added) {
+        std.debug.print("  ⚠️  Path may already exist\n", .{});
+    }
+
+    std.debug.print("  ✓ Path added: 127.0.0.1:19990\n\n", .{});
+
+    // Step 4: Join network (use controller's actual network)
+    // Network ID is (controller_address << 24) | 0x000001
+    const test_network_id = (controller.address.toInt() << 24) | 0x000001;
+    std.debug.print("Step 4: Joining network 0x{x}...\n", .{test_network_id});
+
     const network = try node.joinNetwork(test_network_id);
 
     std.debug.print("  ✓ Network joined\n\n", .{});
 
-    // Step 4: Request configuration
-    std.debug.print("Step 4: Requesting network configuration...\n", .{});
+    // Step 5: Request configuration
+    std.debug.print("Step 5: Requesting network configuration...\n", .{});
 
     network.requestConfiguration(null);
 
     std.debug.print("  ✓ Config request sent\n", .{});
     std.debug.print("  ℹ  Packets sent so far: {}\n\n", .{test_ctx.packets_sent});
 
-    // Step 5 & 6: Verify test infrastructure
-    std.debug.print("Step 5-6: Verifying test infrastructure...\n", .{});
+    // Step 6: Controller receives and processes the request
+    std.debug.print("Step 6: Controller processing request...\n", .{});
+
+    // Give packet time to arrive (localhost should be fast but give it a moment)
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+
+    var recv_buf: [4096]u8 = undefined;
+    var from_addr: net.Address = undefined;
+    var from_len: std.posix.socklen_t = @sizeOf(net.Address);
+
+    const recv_len = std.posix.recvfrom(
+        controller.socket,
+        &recv_buf,
+        0,
+        &from_addr.any,
+        &from_len,
+    ) catch |err| {
+        std.debug.print("  ❌ Failed to receive: {}\n", .{err});
+        return error.ReceiveFailed;
+    };
+
+    std.debug.print("  ✓ Received {} bytes\n", .{recv_len});
+
+    // Parse and handle the packet
+    const Packet = @import("node/packet.zig").Packet;
+    const pkt_mod = @import("node/packet.zig");
+    const PacketBuffer = @import("node/buffer.zig").Buffer(pkt_mod.max_packet_length);
+
+    var pkt_buf: PacketBuffer = .{};
+    try pkt_buf.copyFrom(recv_buf[0..recv_len]);
+    var received_pkt = Packet{ .buf = pkt_buf };
+
+    const source = received_pkt.source();
+    std.debug.print("  ✓ Packet source: {}\n", .{source});
+
+    // Handle the packet via controller (will dearmor internally)
+    try controller.handlePacket(&received_pkt, &from_addr, source);
+
+    std.debug.print("  ✓ Controller processed request\n\n", .{});
+
+    // Step 7: Verify packet exchange
+    std.debug.print("Step 7: Verifying packet exchange...\n", .{});
 
     // Verify network object exists and has correct ID
     try testing.expect(network.id() == test_network_id);

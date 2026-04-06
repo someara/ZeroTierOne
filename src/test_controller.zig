@@ -89,8 +89,10 @@ pub const Controller = struct {
             ctrl.peers.deinit();
         }
 
-        // Create a test network
-        try ctrl.createNetwork(0x8056c2e21c000001, "TestNetwork");
+        // Create a test network with ID derived from controller address
+        // Network ID format: (controller_address << 24) | network_number
+        const test_network_id = (address.toInt() << 24) | 0x000001;
+        try ctrl.createNetwork(test_network_id, "TestNetwork");
 
         return ctrl;
     }
@@ -205,7 +207,22 @@ pub const Controller = struct {
         // For now, this is just a placeholder for future implementation
     }
 
-    fn handlePacket(self: *Controller, packet: *Packet, from_addr: *net.Address, source: Address) !void {
+    pub fn handlePacket(self: *Controller, packet: *Packet, from_addr: *net.Address, source: Address) !void {
+        // Dearmor packet first (verb is encrypted)
+        const peer_addr_int = source._a;
+        const peer_info = self.peers.get(peer_addr_int);
+
+        if (peer_info) |info| {
+            const mac_valid = packet.dearmor(&info.shared_key, null, null);
+            if (!mac_valid) {
+                std.debug.print("  ❌ Invalid MAC, dropping packet\n", .{});
+                return;
+            }
+        } else {
+            std.debug.print("  ⚠️  Unknown peer {x:0>10}, cannot dearmor\n", .{peer_addr_int});
+            return;
+        }
+
         const verb = packet.verb();
 
         switch (verb) {
@@ -223,43 +240,28 @@ pub const Controller = struct {
     ) !void {
         std.debug.print("  → Processing NETWORK_CONFIG_REQUEST\n", .{});
 
-        // Get or create peer info
+        // Note: Packet is already dearmored in handlePacket()
         const peer_addr_int = source._a;
-        const peer_info = self.peers.get(peer_addr_int);
 
+        // Get shared key for response encryption
+        const peer_info = self.peers.get(peer_addr_int);
         var shared_key: [32]u8 = undefined;
         var key_available = false;
 
         if (peer_info) |info| {
             shared_key = info.shared_key;
             key_available = true;
-        } else {
-            // NOTE BUG #9: Architectural issue - controller doesn't know peers!
-            // In real ZeroTier, controller and root server share peer database.
-            // For testing, we skip MAC validation for unknown peers.
-            // TODO: Either merge controller into root-server, or have clients
-            // include identity in NETWORK_CONFIG_REQUEST (non-standard).
-            std.debug.print("    ⚠️  Unknown peer, skipping MAC validation (INSECURE!)\n", .{});
         }
 
-        // Try to dearmor
-        if (key_available) {
-            const mac_valid = packet.dearmor(&shared_key, null, null);
-            if (!mac_valid) {
-                std.debug.print("    ❌ Invalid MAC\n", .{});
-                return;
-            }
-            std.debug.print("    ✓ MAC valid\n", .{});
-        }
-
-        // Parse network ID from payload
+        // Parse network ID from payload (big-endian)
         // Fixed: Exhaustive error handling per STYLE.md 2.1
-        const network_id = packet.buf.at(u64, pkt.idx_payload) catch |err| switch (err) {
+        const network_id_be = packet.buf.at(u64, pkt.idx_payload) catch |err| switch (err) {
             error.OutOfBounds => {
                 std.debug.print("    ❌ NETWORK_CONFIG_REQUEST packet too short (truncated)\n", .{});
                 return;
             },
         };
+        const network_id = @byteSwap(network_id_be);
 
         std.debug.print("    Requested network: 0x{x}\n", .{network_id});
 
