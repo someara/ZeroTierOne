@@ -25,6 +25,7 @@ const World = @import("node/world.zig").World;
 const Buffer = @import("node/buffer.zig").Buffer;
 const Peer = @import("node/peer.zig").Peer;
 const constants = @import("node/constants.zig");
+const MAC = @import("node/mac.zig").MAC;
 
 /// Service context - holds all state for the running service
 pub const Service = struct {
@@ -778,11 +779,15 @@ fn onPhyFdActivity(sock: *PhySocket, user_ptr: *?*anyopaque, readable: bool, wri
     const ip_version = if (len > 0) buf[0] >> 4 else 0;
 
     if (ip_version == 4 or ip_version == 6) {
-        // For IP packets from TUN, we need to construct MAC addresses
-        // Source: derive from node address (TODO: proper derivation)
-        // Dest: broadcast for now (TODO: extract from IP routing)
-        const source_mac: u64 = 0; // TODO: derive from node address
+        // Derive source MAC from our node's address and network ID
+        const source_mac_obj = MAC.fromAddress(service.node.identity.address(), nwid);
+        const source_mac = source_mac_obj.toInt();
+
+        // Extract destination IP and derive destination MAC
+        // For now, use broadcast MAC (will be refined by switch layer)
+        // The switch/network layer will do proper ARP/ND lookup if needed
         const dest_mac: u64 = 0xFFFFFFFFFFFF; // broadcast
+
         const ether_type: u32 = if (ip_version == 4) 0x0800 else 0x86DD;
 
         service.node.processVirtualNetworkFrame(

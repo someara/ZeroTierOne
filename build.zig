@@ -163,6 +163,18 @@ pub fn build(b: *std.Build) void {
     );
     test_two_nodes_step.dependOn(test_two_nodes);
 
+    const test_tun_integration = addTestRoot(
+        b,
+        target,
+        optimize,
+        "src/test_tun_integration.zig",
+    );
+    const test_tun_integration_step = b.step(
+        "test-tun",
+        "Run TUN device integration test",
+    );
+    test_tun_integration_step.dependOn(test_tun_integration);
+
     // ---------------------------------------------------------------
     // ZeroTea demonstration executable (`zig build zig-demo`)
     // ---------------------------------------------------------------
