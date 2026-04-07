@@ -24,6 +24,7 @@ const HttpApi = @import("node/http_api.zig").HttpApi;
 const World = @import("node/world.zig").World;
 const Buffer = @import("node/buffer.zig").Buffer;
 const Peer = @import("node/peer.zig").Peer;
+const constants = @import("node/constants.zig");
 
 /// Service context - holds all state for the running service
 pub const Service = struct {
@@ -38,8 +39,9 @@ pub const Service = struct {
     // Secondary UDP sockets (for multiple ports)
     secondary_socks: std.ArrayList(*PhySocket),
 
-    // TUN device for virtual network interface
-    tun: ?TunDevice,
+    // TUN devices - one per network
+    tuns: std.AutoHashMap(u64, TunDevice), // nwid → TUN
+    tun_sockets: std.AutoHashMap(u64, *PhySocket), // nwid → Phy socket wrapper
 
     // HTTP API server
     http_api: ?*HttpApi,
@@ -84,6 +86,7 @@ pub const Service = struct {
             .wireSend = nodeWireSend,
             .frameInject = nodeFrameInject,
             .event = nodeEvent,
+            .configure_virtual_network_port = nodeConfigureVirtualNetwork,
         };
 
         // Set home dir for state persistence callbacks (before Node.init)
@@ -113,8 +116,9 @@ pub const Service = struct {
             .phy = phy,
             .primary_port = primary_port,
             .primary_sock = null,
-            .secondary_socks = std.ArrayList(*PhySocket){ .items = &.{}, .capacity = 0 },
-            .tun = null,
+            .secondary_socks = std.ArrayList(*PhySocket).init(allocator),
+            .tuns = std.AutoHashMap(u64, TunDevice).init(allocator),
+            .tun_sockets = std.AutoHashMap(u64, *PhySocket).init(allocator),
             .http_api = null,
             .auth_token = null,
             .home_dir = home_dir,
@@ -137,13 +141,20 @@ pub const Service = struct {
     pub fn deinit(self: *Service) void {
         std.debug.print("Shutting down service...\n", .{});
         if (self.http_api) |api| api.stop();
-        if (self.tun) |*tun| tun.close();
+
+        // Close all TUNs
+        var tun_iter = self.tuns.iterator();
+        while (tun_iter.next()) |entry| {
+            entry.value_ptr.close();
+        }
+        self.tuns.deinit();
+        self.tun_sockets.deinit();
 
         // Close all sockets before freeing tracking structures
         for (self.secondary_socks.items) |sock| {
             self.phy.close(sock, false);
         }
-        self.secondary_socks.deinit(self.allocator);
+        self.secondary_socks.deinit();
         if (self.primary_sock) |sock| {
             self.phy.close(sock, false);
         }
@@ -561,6 +572,109 @@ pub const Service = struct {
         self.terminate = true;
         self.phy.whack(); // Wake up poll()
     }
+
+    /// Create TUN device for a network
+    fn createTunForNetwork(self: *Service, nwid: u64, config: *const constants.c_api.ZT_VirtualNetworkConfig) !void {
+        // Check if TUN already exists
+        if (self.tuns.get(nwid)) |_| {
+            // TUN already exists for this network
+            // TODO: update routes if config changed
+            return;
+        }
+
+        // Create TUN device
+        var tun = try TunDevice.openWithNetworkId(self.allocator, "zt", nwid);
+        errdefer tun.close();
+
+        // Configure IP address (first assigned address)
+        if (config.assignedAddressCount > 0) {
+            const first_addr = config.assignedAddresses[0];
+            // Extract IP and netmask from InetAddress
+            // first_addr.ipVersion: 4 = IPv4, 6 = IPv6
+            if (first_addr.ipVersion == 4) {
+                const ip = [4]u8{
+                    @truncate(first_addr.ip[0] >> 24),
+                    @truncate(first_addr.ip[0] >> 16),
+                    @truncate(first_addr.ip[0] >> 8),
+                    @truncate(first_addr.ip[0]),
+                };
+
+                // Calculate netmask from CIDR bits
+                const bits = first_addr.port; // port field repurposed for netmask bits
+                var netmask = [4]u8{ 0, 0, 0, 0 };
+                var remaining_bits = bits;
+                for (&netmask) |*byte| {
+                    if (remaining_bits >= 8) {
+                        byte.* = 0xFF;
+                        remaining_bits -= 8;
+                    } else if (remaining_bits > 0) {
+                        byte.* = @truncate(0xFF << @intCast(8 - remaining_bits));
+                        remaining_bits = 0;
+                    }
+                }
+
+                try tun.setAddress(ip, netmask);
+            }
+        }
+
+        // Add routes for managed routes
+        for (0..config.routeCount) |i| {
+            const route = config.routes[i];
+            if (route.via.ipVersion == 0) { // via == 0 means direct route via this interface
+                if (route.target.ipVersion == 4) {
+                    const dest = [4]u8{
+                        @truncate(route.target.ip[0] >> 24),
+                        @truncate(route.target.ip[0] >> 16),
+                        @truncate(route.target.ip[0] >> 8),
+                        @truncate(route.target.ip[0]),
+                    };
+
+                    // Calculate netmask from CIDR
+                    const bits = route.target.port;
+                    var netmask = [4]u8{ 0, 0, 0, 0 };
+                    var remaining_bits = bits;
+                    for (&netmask) |*byte| {
+                        if (remaining_bits >= 8) {
+                            byte.* = 0xFF;
+                            remaining_bits -= 8;
+                        } else if (remaining_bits > 0) {
+                            byte.* = @truncate(0xFF << @intCast(8 - remaining_bits));
+                            remaining_bits = 0;
+                        }
+                    }
+
+                    tun.addRoute(dest, netmask) catch {
+                        // Route might already exist, continue
+                    };
+                }
+            }
+        }
+
+        // Add TUN fd to Phy for polling
+        const phy_sock = try self.phy.wrapSocket(tun.fd, @ptrCast(&self));
+
+        // Store TUN device
+        try self.tuns.put(nwid, tun);
+        try self.tun_sockets.put(nwid, phy_sock);
+
+        std.debug.print("  ✓ Created TUN device for network {x:0>16}\n", .{nwid});
+    }
+
+    /// Destroy TUN device for a network
+    fn destroyTunForNetwork(self: *Service, nwid: u64) void {
+        // Remove from Phy
+        if (self.tun_sockets.get(nwid)) |phy_sock| {
+            self.phy.close(phy_sock, false);
+            _ = self.tun_sockets.remove(nwid);
+        }
+
+        // Close and remove TUN
+        if (self.tuns.fetchRemove(nwid)) |entry| {
+            var tun = entry.value;
+            tun.close();
+            std.debug.print("  ✓ Destroyed TUN device for network {x:0>16}\n", .{nwid});
+        }
+    }
 };
 
 // ── Phy Callbacks ──────────────────────────────────────────────────────────
@@ -627,7 +741,65 @@ fn onPhyTcpAccept(_: *PhySocket, _: *PhySocket, _: *?*anyopaque, _: *?*anyopaque
 fn onPhyTcpClose(_: *PhySocket, _: *?*anyopaque) void {}
 fn onPhyTcpData(_: *PhySocket, _: *?*anyopaque, _: []const u8) void {}
 fn onPhyTcpWritable(_: *PhySocket, _: *?*anyopaque) void {}
-fn onPhyFdActivity(_: *PhySocket, _: *?*anyopaque, _: bool, _: bool) void {}
+
+/// Phy callback: File descriptor activity (for TUN devices)
+fn onPhyFdActivity(sock: *PhySocket, user_ptr: *?*anyopaque, readable: bool, writable: bool) void {
+    _ = writable;
+
+    if (!readable) return;
+
+    // Get service from user_ptr
+    const service: *Service = @ptrCast(@alignCast(user_ptr.*.?));
+
+    // Find which TUN this fd belongs to
+    const fd = sock.fd;
+    var tun_nwid: ?u64 = null;
+    var tun_iter = service.tuns.iterator();
+    while (tun_iter.next()) |entry| {
+        if (entry.value_ptr.fd == fd) {
+            tun_nwid = entry.key_ptr.*;
+            break;
+        }
+    }
+
+    const nwid = tun_nwid orelse return;
+    var tun = service.tuns.getPtr(nwid).?;
+
+    // Read packet from TUN
+    var buf: [2048]u8 = undefined;
+    const len = tun.read(&buf) catch |err| {
+        if (err != error.WouldBlock) {
+            std.debug.print("  ✗ TUN read error: {}\n", .{err});
+        }
+        return;
+    };
+
+    // Parse IP version to determine ethertype
+    const ip_version = if (len > 0) buf[0] >> 4 else 0;
+
+    if (ip_version == 4 or ip_version == 6) {
+        // For IP packets from TUN, we need to construct MAC addresses
+        // Source: derive from node address (TODO: proper derivation)
+        // Dest: broadcast for now (TODO: extract from IP routing)
+        const source_mac: u64 = 0; // TODO: derive from node address
+        const dest_mac: u64 = 0xFFFFFFFFFFFF; // broadcast
+        const ether_type: u32 = if (ip_version == 4) 0x0800 else 0x86DD;
+
+        service.node.processVirtualNetworkFrame(
+            null,
+            std.time.milliTimestamp(),
+            nwid,
+            source_mac,
+            dest_mac,
+            ether_type,
+            0, // vlan_id
+            &buf,
+            @intCast(len),
+        ) catch |err| {
+            std.debug.print("  ✗ Failed to process TUN frame: {}\n", .{err});
+        };
+    }
+}
 
 // ── Node Callbacks ─────────────────────────────────────────────────────────
 
@@ -795,23 +967,28 @@ fn nodeFrameInject(
 ) void {
     const service: *Service = @ptrCast(@alignCast(ctx.?));
 
-    _ = nwid;
     _ = source_mac;
     _ = dest_mac;
-    _ = ether_type;
     _ = vlan_id;
 
-    // Write packet to TUN device
-    if (service.tun) |*tun| {
-        const packet = data[0..len];
-        tun.write(packet) catch |err| {
-            std.debug.print("  ✗ TUN write failed: {}\n", .{err});
-            return;
-        };
-        std.debug.print("  → Injected {d} bytes to TUN device\n", .{len});
-    } else {
-        std.debug.print("  ⚠ No TUN device - dropping frame ({d} bytes)\n", .{len});
+    // Only handle IP packets
+    if (ether_type != 0x0800 and ether_type != 0x86DD) {
+        return; // Not IP
     }
+
+    // Find TUN for this network
+    var tun = service.tuns.getPtr(nwid) orelse {
+        // No TUN device for this network (might not be joined yet)
+        return;
+    };
+
+    // Write IP packet to TUN
+    const packet = data[0..len];
+    tun.write(packet) catch |err| {
+        std.debug.print("  ✗ TUN write failed for network {x:0>16}: {}\n", .{ nwid, err });
+        return;
+    };
+    std.debug.print("  → Injected {d} bytes to TUN device for network {x:0>16}\n", .{ len, nwid });
 }
 
 /// Node callback: Event notification (UP, ONLINE, OFFLINE, etc.)
@@ -829,4 +1006,42 @@ fn nodeEvent(
     };
 
     std.debug.print("  → Event: {s}\n", .{event_name});
+}
+
+/// Node callback: Configure virtual network port (create/update/destroy TUN)
+fn nodeConfigureVirtualNetwork(
+    ctx: ?*anyopaque,
+    _: ?*anyopaque,
+    _: ?*anyopaque,
+    nwid: u64,
+    _: *?*anyopaque,
+    operation: c_uint,
+    config: ?*const constants.c_api.ZT_VirtualNetworkConfig,
+) i32 {
+    const service: *Service = @ptrCast(@alignCast(ctx.?));
+
+    // operation values:
+    // 0 = up (network joined, config received)
+    // 1 = config update
+    // 2 = down (network left)
+    // 3 = destroy
+
+    switch (operation) {
+        0, 1 => { // UP or CONFIG_UPDATE
+            if (config) |cfg| {
+                std.debug.print("  → Network {x:0>16}: Creating/updating TUN device\n", .{nwid});
+                service.createTunForNetwork(nwid, cfg) catch |err| {
+                    std.debug.print("  ✗ Failed to create TUN: {}\n", .{err});
+                    return -1;
+                };
+            }
+        },
+        2, 3 => { // DOWN or DESTROY
+            std.debug.print("  → Network {x:0>16}: Destroying TUN device\n", .{nwid});
+            service.destroyTunForNetwork(nwid);
+        },
+        else => {},
+    }
+
+    return 0;
 }
